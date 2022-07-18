@@ -728,11 +728,10 @@ repeat for each character in a text.")
     `(let ((beg yaml--parsing-position)
            (_ (when (and yaml--parse-debug
                          (not (member ,name yaml--tracing-ignore)))
-                (message "|%s>%s %40s args=%s '%s'"
+                (message "|%s>%s %40s '%s'"
                          (make-string (length yaml--states) ?-)
                          (make-string (- 70 (length yaml--states)) ?\s)
                          ,name
-                         args
                          (replace-regexp-in-string
                           "\n"
                           "↓"
@@ -936,10 +935,10 @@ This is currently unimplemented."
             "\\^g(?:---|\\.\\.\\.\\)\\([[:blank:]]\\|$\\)"
             (substring yaml--parsing-input yaml--parsing-position)))))
 
-(defun yaml--ord (f)
-  "Convert an ASCII number returned by F to a number."
-  (let ((res (funcall f)))
-    (- (aref res 0) 48)))
+(defmacro yaml--ord (&rest forms)
+  "Convert an ASCII number returned by FORMS to a number."
+  `(let ((res (progn ,@forms)))
+     (- (aref res 0) 48)))
 
 (defmacro yaml--but (&rest forms)
   "Match the first in FORMS but none of the others."
@@ -996,7 +995,7 @@ This is currently unimplemented."
 
 (defun yaml--top ()
   "Perform top level YAML parsing rule."
-  (yaml--parse-from-grammar 'l-yaml-stream))
+  (yaml--parse-l-yaml-stream))
 
 (defmacro yaml--set (variable value)
   "Set the current state of VARIABLE to VALUE."
@@ -1140,1586 +1139,1467 @@ changes in the future."
                        :object-key-type 'string
                        :string-values t)))
 
-(defun yaml--parse-from-grammar (state &rest args)
-  "Parse YAML grammar for given STATE and ARGS.
+;;; YAML grammar functions for each state. Each function is a spec
+;;; defined by the yaml-spec JSON file.
 
-Rules for this function are defined by the yaml-spec JSON file."
-  (pcase state
-    ('c-flow-sequence
-     (let ((n (nth 0 args))
-           (c (nth 1 args)))
-       (yaml--frame "c-flow-sequence"
-         (yaml--all
-          (yaml--chr ?\[)
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 's-separate n c))
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar
-             'ns-s-flow-seq-entries n
-             (yaml--parse-from-grammar 'in-flow c)))
-          (yaml--chr ?\])))))
+(defun yaml--parse-c-flow-sequence (n c)
+  (yaml--frame "c-flow-sequence"
+    (yaml--all
+     (yaml--chr ?\[)
+     (yaml--rep 0 1
+       (yaml--parse-s-separate n c))
+     (yaml--rep 0 1
+       (yaml--parse-ns-s-flow-seq-entries
+        n
+        (yaml--parse-in-flow c)))
+     (yaml--chr ?\]))))
 
-    ('c-indentation-indicator
-     (let ((m (nth 0 args)))
-       (yaml--frame "c-indentation-indicator"
-         (yaml--any (when (yaml--parse-from-grammar 'ns-dec-digit)
-                      (yaml--set m (yaml--ord (lambda () (yaml--match)))) t)
-                    (when (yaml--empty)
-                      (let ((new-m (yaml--auto-detect m)))
-                        (yaml--set m new-m))
-                      t)))))
+(defun yaml--parse-c-indentation-indicator (m)
+  (yaml--frame "c-indentation-indicator"
+    (yaml--any (when (yaml--parse-ns-dec-digit)
+                 (yaml--set m (yaml--ord (yaml--match))) t)
+               (when (yaml--empty)
+                 (let ((new-m (yaml--auto-detect m)))
+                   (yaml--set m new-m))
+                 t))))
 
-    ('ns-reserved-directive
-     (yaml--frame "ns-reserved-directive"
-       (yaml--all (yaml--parse-from-grammar 'ns-directive-name)
-                  (yaml--rep 0 nil
-                    (yaml--all
-                     (yaml--parse-from-grammar 's-separate-in-line)
-                     (yaml--parse-from-grammar 'ns-directive-parameter))))))
+(defun yaml--parse-ns-reserved-directive ()
+  (yaml--frame "ns-reserved-directive"
+    (yaml--all (yaml--parse-ns-directive-name)
+               (yaml--rep 0 nil
+                 (yaml--all
+                  (yaml--parse-s-separate-in-line)
+                  (yaml--parse-ns-directive-parameter))))))
 
-    ('ns-flow-map-implicit-entry
-     (let ((n (nth 0 args))
-           (c (nth 1 args)))
-       (yaml--frame "ns-flow-map-implicit-entry"
-         ;; NOTE: I ran into a bug with the order of these rules. It seems
-         ;; sometimes ns-flow-map-yaml-key-entry succeeds with an empty
-         ;; when the correct answer should be
-         ;; c-ns-flow-map-json-key-entry.  Changing the order seemed to
-         ;; have fix this but this seems like a bandage fix.
-         (yaml--any
-          (yaml--parse-from-grammar 'c-ns-flow-map-json-key-entry n c)
-          (yaml--parse-from-grammar 'ns-flow-map-yaml-key-entry n c)
-          (yaml--parse-from-grammar 'c-ns-flow-map-empty-key-entry n c)))))
+(defun yaml--parse-ns-flow-map-implicit-entry (n c)
+  (yaml--frame "ns-flow-map-implicit-entry"
+    ;; NOTE: I ran into a bug with the order of these rules. It seems
+    ;; sometimes ns-flow-map-yaml-key-entry succeeds with an empty
+    ;; when the correct answer should be
+    ;; c-ns-flow-map-json-key-entry.  Changing the order seemed to
+    ;; have fix this but this seems like a bandage fix.
+    (yaml--any
+     (yaml--parse-c-ns-flow-map-json-key-entry n c)
+     (yaml--parse-ns-flow-map-yaml-key-entry n c)
+     (yaml--parse-c-ns-flow-map-empty-key-entry n c))))
 
-    ('ns-esc-double-quote
-     (yaml--frame "ns-esc-double-quote"
-       (yaml--chr ?\")))
+(defun yaml--parse-ns-esc-double-quote ()
+  (yaml--frame "ns-esc-double-quote"
+    (yaml--chr ?\")))
 
-    ('c-mapping-start
-     (yaml--frame "c-mapping-start" (yaml--chr ?\{)))
+(defun yaml--parse-c-mapping-start ()
+  (yaml--frame "c-mapping-start"
+    (yaml--chr ?\{)))
 
-    ('ns-flow-seq-entry
-     (let ((n (nth 0 args))
-           (c (nth 1 args)))
-       (yaml--frame "ns-flow-seq-entry"
-         (yaml--any (yaml--parse-from-grammar 'ns-flow-pair n c)
-                    (yaml--parse-from-grammar 'ns-flow-node n c)))))
+(defun yaml--parse-ns-flow-seq-entry (n c)
+  (yaml--frame "ns-flow-seq-entry"
+    (yaml--any (yaml--parse-ns-flow-pair n c)
+               (yaml--parse-ns-flow-node n c))))
 
-    ('l-empty
-     (let ((n (nth 0 args))
-           (c (nth 1 args)))
-       (yaml--frame "l-empty"
-         (yaml--all (yaml--any (yaml--parse-from-grammar 's-line-prefix n c)
-                               (yaml--parse-from-grammar 's-indent-lt n))
-                    (yaml--parse-from-grammar 'b-as-line-feed)))))
+(defun yaml--parse-l-empty (n c)
+  (yaml--frame "l-empty"
+    (yaml--all (yaml--any (yaml--parse-s-line-prefix n c)
+                          (yaml--parse-s-indent-lt n))
+               (yaml--parse-b-as-line-feed))))
 
-    ('c-primary-tag-handle
-     (yaml--frame "c-primary-tag-handle" (yaml--chr ?\!)))
+(defun yaml--parse-c-primary-tag-handle ()
+  (yaml--frame "c-primary-tag-handle"
+    (yaml--chr ?\!)))
 
-    ('ns-plain-safe-out
-     (yaml--frame "ns-plain-safe-out"
-       (yaml--parse-from-grammar 'ns-char)))
+(defun yaml--parse-ns-plain-safe-out ()
+ (yaml--frame "ns-plain-safe-out"
+   (yaml--parse-ns-char)))
 
-    ('c-ns-shorthand-tag
-     (yaml--frame "c-ns-shorthand-tag"
+(defun yaml--parse-c-ns-shorthand-tag ()
+ (yaml--frame "c-ns-shorthand-tag"
+   (yaml--all
+    (yaml--parse-c-tag-handle)
+    (yaml--rep 1 nil
+      (yaml--parse-ns-tag-char)))))
+
+
+(defun yaml--parse-nb-ns-single-in-line ()
+  (yaml--frame "nb-ns-single-in-line"
+    (yaml--rep 0 nil
+      (yaml--all (yaml--rep 0 nil
+                   (yaml--parse-s-white))
+                 (yaml--parse-ns-single-char)))))
+
+(defun yaml--parse-l-strip-empty (n)
+  (yaml--frame "l-strip-empty"
+    (yaml--all
+     (yaml--rep 0 nil
        (yaml--all
-        (yaml--parse-from-grammar 'c-tag-handle)
-        (yaml--rep 1 nil (yaml--parse-from-grammar 'ns-tag-char)))))
+        (yaml--parse-s-indent-le n)
+        (yaml--parse-b-non-content)))
+     (yaml--rep 0 1
+       (yaml--parse-l-trail-comments n)))))
 
-    ('nb-ns-single-in-line
-     (yaml--frame "nb-ns-single-in-line"
-       (yaml--rep 0 nil
-         (yaml--all (yaml--rep 0 nil
-                      (yaml--parse-from-grammar 's-white))
-                    (yaml--parse-from-grammar 'ns-single-char)))))
+(defun yaml--parse-c-indicator ()
+  (yaml--frame "c-indicator"
+    (yaml--any (yaml--chr ?\-)
+               (yaml--chr ?\?)
+               (yaml--chr ?\:)
+               (yaml--chr ?\,)
+               (yaml--chr ?\[)
+               (yaml--chr ?\])
+               (yaml--chr ?\{)
+               (yaml--chr ?\})
+               (yaml--chr ?\#)
+               (yaml--chr ?\&)
+               (yaml--chr ?\*)
+               (yaml--chr ?\!)
+               (yaml--chr ?\|)
+               (yaml--chr ?\>)
+               (yaml--chr ?\')
+               (yaml--chr ?\")
+               (yaml--chr ?\%)
+               (yaml--chr ?\@)
+               (yaml--chr ?\`))))
 
-    ('l-strip-empty
-     (let ((n (nth 0 args)))
-       (yaml--frame "l-strip-empty"
-         (yaml--all
-          (yaml--rep 0 nil
-            (yaml--all
-             (yaml--parse-from-grammar 's-indent-le n)
-             (yaml--parse-from-grammar 'b-non-content)))
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 'l-trail-comments n))))))
+(defun yaml--parse-c-l+literal (n)
+  (yaml--frame "c-l+literal"
+    (progn
+      (yaml--all
+       (yaml--chr ?\|)
+       (yaml--parse-c-b-block-header n (yaml--state-curr-t))
+       (yaml--parse-l-literal-content
+        (max (+ n (yaml--state-curr-m)) 1)
+        (yaml--state-curr-t))))))
 
-    ('c-indicator
-     (yaml--frame "c-indicator"
-       (yaml--any (yaml--chr ?\-)
-                  (yaml--chr ?\?)
-                  (yaml--chr ?\:)
-                  (yaml--chr ?\,)
-                  (yaml--chr ?\[)
-                  (yaml--chr ?\])
-                  (yaml--chr ?\{)
-                  (yaml--chr ?\})
-                  (yaml--chr ?\#)
-                  (yaml--chr ?\&)
-                  (yaml--chr ?\*)
-                  (yaml--chr ?\!)
-                  (yaml--chr ?\|)
-                  (yaml--chr ?\>)
-                  (yaml--chr ?\')
-                  (yaml--chr ?\")
-                  (yaml--chr ?\%)
-                  (yaml--chr ?\@)
-                  (yaml--chr ?\`))))
+(defun yaml--parse-c-single-quoted (n c)
+  (yaml--frame "c-single-quoted"
+    (yaml--all (yaml--chr ?\')
+               (yaml--parse-nb-single-text n c)
+               (yaml--chr ?\'))))
 
-    ('c-l+literal
-     (let ((n (nth 0 args)))
-       (yaml--frame "c-l+literal"
-         (progn
-           (yaml--all
-            (yaml--chr ?\|)
-            (yaml--parse-from-grammar 'c-b-block-header n (yaml--state-curr-t))
-            (yaml--parse-from-grammar 'l-literal-content
-                                      (max (+ n (yaml--state-curr-m)) 1)
-                                      (yaml--state-curr-t)))))))
+(defun yaml--parse-c-forbidden ()
+  (yaml--frame "c-forbidden"
+    (yaml--all (yaml--start-of-line)
+               (yaml--any
+                (yaml--parse-c-directives-end)
+                (yaml--parse-c-document-end))
+               (yaml--any
+                (yaml--parse-b-char)
+                (yaml--parse-s-white)
+                (yaml--end-of-stream)))))
 
-    ('c-single-quoted
-     (let ((n (nth 0 args))
-           (c (nth 1 args)))
-       (yaml--frame "c-single-quoted"
-         (yaml--all (yaml--chr ?\')
-                    (yaml--parse-from-grammar 'nb-single-text n c)
-                    (yaml--chr ?\')))))
+(defun yaml--parse-c-ns-alias-node ()
+  (yaml--frame "c-ns-alias-node"
+    (yaml--all (yaml--chr ?\*)
+               (yaml--parse-ns-anchor-name))))
 
-    ('c-forbidden
-     (yaml--frame "c-forbidden"
-       (yaml--all (yaml--start-of-line)
-                  (yaml--any
-                   (yaml--parse-from-grammar 'c-directives-end)
-                   (yaml--parse-from-grammar 'c-document-end))
-                  (yaml--any
-                   (yaml--parse-from-grammar 'b-char)
-                   (yaml--parse-from-grammar 's-white)
-                   (yaml--end-of-stream)))))
+(defun yaml--parse-c-secondary-tag-handle ()
+ (yaml--frame "c-secondary-tag-handle"
+   (yaml--all (yaml--chr ?\!) (yaml--chr ?\!))))
 
-    ('c-ns-alias-node
-     (yaml--frame "c-ns-alias-node"
-       (yaml--all (yaml--chr ?\*)
-                  (yaml--parse-from-grammar 'ns-anchor-name))))
+(defun yaml--parse-ns-esc-next-line ()
+ (yaml--frame "ns-esc-next-line" (yaml--chr ?N)))
 
-    ('c-secondary-tag-handle
-     (yaml--frame "c-secondary-tag-handle"
-       (yaml--all (yaml--chr ?\!) (yaml--chr ?\!))))
+(defun yaml--parse-l-nb-same-lines (n)
+  (yaml--frame "l-nb-same-lines"
+    (yaml--all
+     (yaml--rep 0 nil
+       (yaml--parse-l-empty n "block-in"))
+     (yaml--any (yaml--parse-l-nb-folded-lines n)
+                (yaml--parse-l-nb-spaced-lines n)))))
 
-    ('ns-esc-next-line
-     (yaml--frame "ns-esc-next-line" (yaml--chr ?N)))
+(defun yaml--parse-c-alias ()
+ (yaml--frame "c-alias" (yaml--chr ?\*)))
 
-    ('l-nb-same-lines
-     (let ((n (nth 0 args)))
-       (yaml--frame "l-nb-same-lines"
-         (yaml--all
-          (yaml--rep 0 nil
-            (yaml--parse-from-grammar 'l-empty n "block-in"))
-          (yaml--any (yaml--parse-from-grammar 'l-nb-folded-lines n)
-                     (yaml--parse-from-grammar 'l-nb-spaced-lines n))))))
+(defun yaml--parse-ns-single-char ()
+ (yaml--frame "ns-single-char"
+   (yaml--but (yaml--parse-nb-single-char)
+              (yaml--parse-s-white))))
 
-    ('c-alias
-     (yaml--frame "c-alias" (yaml--chr ?\*)))
+(defun yaml--parse-c-l-block-map-implicit-value (n)
+  (yaml--frame "c-l-block-map-implicit-value"
+    (yaml--all (yaml--chr ?\:)
+               (yaml--any
+                (yaml--parse-s-l+block-node n "block-out")
+                (yaml--all (yaml--parse-e-node)
+                           (yaml--parse-s-l-comments))))))
 
-    ('ns-single-char
-     (yaml--frame "ns-single-char"
-       (yaml--but (yaml--parse-from-grammar 'nb-single-char)
-                  (yaml--parse-from-grammar 's-white))))
+(defun yaml--parse-ns-uri-char ()
+  (yaml--frame "ns-uri-char"
+    (yaml--any (yaml--all (yaml--chr ?\%)
+                          (yaml--parse-ns-hex-digit)
+                          (yaml--parse-ns-hex-digit))
+               (yaml--parse-ns-word-char)
+               (yaml--chr ?\#)
+               (yaml--chr ?\;)
+               (yaml--chr ?\/)
+               (yaml--chr ?\?)
+               (yaml--chr ?\:)
+               (yaml--chr ?\@)
+               (yaml--chr ?\&)
+               (yaml--chr ?\=)
+               (yaml--chr ?\+)
+               (yaml--chr ?\$)
+               (yaml--chr ?\,)
+               (yaml--chr ?\_)
+               (yaml--chr ?\.)
+               (yaml--chr ?\!)
+               (yaml--chr ?\~)
+               (yaml--chr ?\*)
+               (yaml--chr ?\')
+               (yaml--chr ?\()
+               (yaml--chr ?\))
+               (yaml--chr ?\[)
+               (yaml--chr ?\]))))
 
-    ('c-l-block-map-implicit-value
-     (let ((n (nth 0 args)))
-       (yaml--frame "c-l-block-map-implicit-value"
-         (yaml--all (yaml--chr ?\:)
-                    (yaml--any
-                     (yaml--parse-from-grammar 's-l+block-node n "block-out")
-                     (yaml--all (yaml--parse-from-grammar 'e-node)
-                                (yaml--parse-from-grammar 's-l-comments)))))))
+(defun yaml--parse-ns-esc-16-bit ()
+  (yaml--frame "ns-esc-16-bit"
+    (yaml--all (yaml--chr ?u)
+               (yaml--rep 4 4
+                 (yaml--parse-ns-hex-digit)))))
 
-    ('ns-uri-char
-     (yaml--frame "ns-uri-char"
-       (yaml--any (yaml--all (yaml--chr ?\%)
-                             (yaml--parse-from-grammar 'ns-hex-digit)
-                             (yaml--parse-from-grammar 'ns-hex-digit))
-                  (yaml--parse-from-grammar 'ns-word-char)
-                  (yaml--chr ?\#)
-                  (yaml--chr ?\;)
-                  (yaml--chr ?\/)
-                  (yaml--chr ?\?)
-                  (yaml--chr ?\:)
-                  (yaml--chr ?\@)
-                  (yaml--chr ?\&)
-                  (yaml--chr ?\=)
-                  (yaml--chr ?\+)
-                  (yaml--chr ?\$)
-                  (yaml--chr ?\,)
-                  (yaml--chr ?\_)
-                  (yaml--chr ?\.)
-                  (yaml--chr ?\!)
-                  (yaml--chr ?\~)
-                  (yaml--chr ?\*)
-                  (yaml--chr ?\')
-                  (yaml--chr ?\()
-                  (yaml--chr ?\))
-                  (yaml--chr ?\[)
-                  (yaml--chr ?\]))))
-
-    ('ns-esc-16-bit
-     (yaml--frame "ns-esc-16-bit"
-       (yaml--all (yaml--chr ?u)
-                  (yaml--rep 4 4
-                    (yaml--parse-from-grammar 'ns-hex-digit)))))
-
-    ('l-nb-spaced-lines
-     (let ((n (nth 0 args)))
-       (yaml--frame "l-nb-spaced-lines"
-         (yaml--all
-          (yaml--parse-from-grammar 's-nb-spaced-text n)
-          (yaml--rep 0 nil
-            (yaml--all
-             (yaml--parse-from-grammar 'b-l-spaced n)
-             (yaml--parse-from-grammar 's-nb-spaced-text n)))))))
-
-    ('ns-plain
-     (let ((n (nth 0 args))
-           (c (nth 1 args)))
-       (yaml--frame "ns-plain"
-         (pcase c
-           ("block-key" (yaml--parse-from-grammar 'ns-plain-one-line c))
-           ("flow-in" (yaml--parse-from-grammar 'ns-plain-multi-line n c))
-           ("flow-key" (yaml--parse-from-grammar 'ns-plain-one-line c))
-           ("flow-out" (yaml--parse-from-grammar 'ns-plain-multi-line n c))))))
-
-    ('c-printable
-     (yaml--frame "c-printable"
-       (yaml--any (yaml--chr ?\x09)
-                  (yaml--chr ?\x0A)
-                  (yaml--chr ?\x0D)
-                  (yaml--chr-range ?\x20 ?\x7E)
-                  (yaml--chr ?\x85)
-                  (yaml--chr-range ?\xA0 ?\xD7FF)
-                  (yaml--chr-range ?\xE000 ?\xFFFD)
-                  (yaml--chr-range ?\x010000 ?\x10FFFF))))
-
-    ('c-mapping-value
-     (yaml--frame "c-mapping-value" (yaml--chr ?\:)))
-
-    ('l-nb-literal-text
-     (let ((n (nth 0 args)))
-       (yaml--frame "l-nb-literal-text"
-         (yaml--all
-          (yaml--rep 0 nil
-            (yaml--parse-from-grammar 'l-empty n "block-in"))
-          (yaml--parse-from-grammar 's-indent n)
-          (yaml--rep 1 nil
-            (yaml--parse-from-grammar 'nb-char))))))
-
-    ('ns-plain-char
-     (let ((c (nth 0 args)))
-       (yaml--frame "ns-plain-char"
-         (yaml--any
-          (yaml--but
-           (yaml--parse-from-grammar 'ns-plain-safe c)
-           (yaml--chr ?\:)
-           (yaml--chr ?\#))
-          (yaml--all
-           (yaml--chk "<=" (yaml--parse-from-grammar 'ns-char))
-           (yaml--chr ?\#))
-          (yaml--all
-           (yaml--chr ?\:)
-           (yaml--chk "=" (yaml--parse-from-grammar 'ns-plain-safe c)))))))
-
-    ('ns-anchor-char
-     (yaml--frame "ns-anchor-char"
-       (yaml--but (yaml--parse-from-grammar 'ns-char)
-                  (yaml--parse-from-grammar 'c-flow-indicator))))
-
-    ('s-l+block-scalar
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "s-l+block-scalar"
-         (yaml--all (yaml--parse-from-grammar 's-separate (+ n 1) c)
-                    (yaml--rep 0 1
-                      (yaml--all
-                       (yaml--parse-from-grammar 'c-ns-properties (+ n 1) c)
-                       (yaml--parse-from-grammar 's-separate (+ n 1) c)))
-                    (yaml--any (yaml--parse-from-grammar 'c-l+literal n)
-                               (yaml--parse-from-grammar 'c-l+folded n))))))
-
-    ('ns-plain-safe-in
-     (yaml--frame "ns-plain-safe-in"
-       (yaml--but (yaml--parse-from-grammar 'ns-char)
-                  (yaml--parse-from-grammar 'c-flow-indicator))))
-
-    ('nb-single-text
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "nb-single-text"
-         (pcase c
-           ("block-key" (yaml--parse-from-grammar 'nb-single-one-line))
-           ("flow-in" (yaml--parse-from-grammar 'nb-single-multi-line n))
-           ("flow-key" (yaml--parse-from-grammar 'nb-single-one-line))
-           ("flow-out" (yaml--parse-from-grammar 'nb-single-multi-line n))))))
-
-    ('s-indent-le
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-indent-le"
-         (yaml--all (yaml--rep 0 nil
-                      (yaml--parse-from-grammar 's-space))
-                    (<= (length (yaml--match)) n)))))
-
-    ('ns-esc-carriage-return
-     (yaml--frame "ns-esc-carriage-return" (yaml--chr ?r)))
-
-    ('l-chomped-empty
-     (let ((n (nth 0 args))
-           (tt (nth 1 args)))
-       (yaml--frame "l-chomped-empty"
-         (pcase tt
-           ("clip" (yaml--parse-from-grammar 'l-strip-empty n))
-           ("keep" (yaml--parse-from-grammar 'l-keep-empty n))
-           ("strip" (yaml--parse-from-grammar 'l-strip-empty n))))))
-
-    ('c-s-implicit-json-key
-     (let ((c (nth 0 args)))
-       (yaml--frame "c-s-implicit-json-key"
-         (yaml--all
-          (yaml--max 1024)
-          (yaml--parse-from-grammar 'c-flow-json-node nil c)
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 's-separate-in-line))))))
-
-    ('b-as-space
-     (yaml--frame "b-as-space"
-       (yaml--parse-from-grammar 'b-break)))
-
-    ('ns-s-flow-seq-entries
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-s-flow-seq-entries"
-         (yaml--all
-          (yaml--parse-from-grammar 'ns-flow-seq-entry n c)
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 's-separate n c))
-          (yaml--rep 0 1
-            (yaml--all
-             (yaml--chr ?\,)
-             (yaml--rep 0 1
-               (yaml--parse-from-grammar 's-separate n c))
-             (yaml--rep 0 1
-               (yaml--parse-from-grammar 'ns-s-flow-seq-entries
-                                         n
-                                         c))))))))
-
-    ('l-block-map-explicit-value
-     (let ((n (nth 0 args)))
-       (yaml--frame "l-block-map-explicit-value"
-         (yaml--all
-          (yaml--parse-from-grammar 's-indent n)
-          (yaml--chr ?\:)
-          (yaml--parse-from-grammar 's-l+block-indented n "block-out")))))
-
-    ('c-ns-flow-map-json-key-entry
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-ns-flow-map-json-key-entry"
-         (yaml--all
-          (yaml--parse-from-grammar 'c-flow-json-node n c)
-          (yaml--any
-           (yaml--all
-            (yaml--rep 0 1
-              (yaml--parse-from-grammar 's-separate n c))
-            (yaml--parse-from-grammar 'c-ns-flow-map-adjacent-value n c))
-           (yaml--parse-from-grammar 'e-node))))))
-
-    ('c-sequence-entry
-     (yaml--frame "c-sequence-entry" (yaml--chr ?\-)))
-
-    ('l-bare-document
-     (yaml--frame "l-bare-document"
-       (yaml--all (yaml--exclude "c-forbidden")
-                  (yaml--parse-from-grammar 's-l+block-node -1 "block-in"))))
-
-    ;; TODO: don't use the symbol t as a variable.
-    ('b-chomped-last
-     (let ((tt (nth 0 args)))
-       (yaml--frame "b-chomped-last"
-         (pcase tt
-           ("clip"
-            ;; TODO: Fix this
-            (yaml--any (yaml--parse-from-grammar 'b-as-line-feed)
-                       (yaml--end-of-stream)))
-           ("keep"
-            (yaml--any (yaml--parse-from-grammar 'b-as-line-feed)
-                       (yaml--end-of-stream)))
-           ("strip"
-            (yaml--any (yaml--parse-from-grammar 'b-non-content)
-                       (yaml--end-of-stream)))))))
-
-    ('l-trail-comments
-     (let ((n (nth 0 args)))
-       (yaml--frame "l-trail-comments"
-         (yaml--all (yaml--parse-from-grammar 's-indent-lt n)
-                    (yaml--parse-from-grammar 'c-nb-comment-text)
-                    (yaml--parse-from-grammar 'b-comment)
-                    (yaml--rep 0 nil
-                      (yaml--parse-from-grammar 'l-comment))))))
-
-    ('ns-flow-map-yaml-key-entry
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-map-yaml-key-entry"
-         (yaml--all
-          (yaml--parse-from-grammar 'ns-flow-yaml-node n c)
-          (yaml--any
-           (yaml--all
-            (yaml--rep 0 1
-              (yaml--parse-from-grammar 's-separate n c))
-            (yaml--parse-from-grammar 'c-ns-flow-map-separate-value n c))
-           (yaml--parse-from-grammar 'e-node))))))
-
-    ('s-indent
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-indent"
-         (yaml--rep n n (yaml--parse-from-grammar 's-space)))))
-
-    ('ns-esc-line-separator
-     (yaml--frame "ns-esc-line-separator" (yaml--chr ?L)))
-
-    ('ns-flow-yaml-node
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-yaml-node"
-         (yaml--any
-          (yaml--parse-from-grammar 'c-ns-alias-node)
-          (yaml--parse-from-grammar 'ns-flow-yaml-content n c)
-          (yaml--all
-           (yaml--parse-from-grammar 'c-ns-properties n c)
-           (yaml--any
-            (yaml--all
-             (yaml--parse-from-grammar 's-separate n c)
-             (yaml--parse-from-grammar 'ns-flow-yaml-content n c))
-            (yaml--parse-from-grammar 'e-scalar)))))))
-
-    ('ns-yaml-version
-     (yaml--frame "ns-yaml-version"
-       (yaml--all (yaml--rep 1 nil
-                    (yaml--parse-from-grammar 'ns-dec-digit))
-                  (yaml--chr ?\.)
-                  (yaml--rep 1 nil
-                    (yaml--parse-from-grammar 'ns-dec-digit)))))
-
-    ('c-folded
-     (yaml--frame "c-folded" (yaml--chr ?\>)))
-
-    ('c-directives-end
-     (yaml--frame "c-directives-end"
-       (yaml--all (yaml--chr ?\-) (yaml--chr ?\-) (yaml--chr ?\-))))
-
-    ('s-double-break
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-double-break"
-         (yaml--any (yaml--parse-from-grammar 's-double-escaped n)
-                    (yaml--parse-from-grammar 's-flow-folded n)))))
-
-    ('s-nb-spaced-text
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-nb-spaced-text"
-         (yaml--all (yaml--parse-from-grammar 's-indent n)
-                    (yaml--parse-from-grammar 's-white)
-                    (yaml--rep 0 nil
-                      (yaml--parse-from-grammar 'nb-char))))))
-
-    ('l-folded-content
-     (let ((n (nth 0 args))
-           (tt (nth 1 args)))
-       (yaml--frame "l-folded-content"
-         (yaml--all
-          (yaml--rep 0 1
-            (yaml--all (yaml--parse-from-grammar 'l-nb-diff-lines n)
-                       (yaml--parse-from-grammar 'b-chomped-last tt)))
-          (yaml--parse-from-grammar 'l-chomped-empty n tt)))))
-
-    ('nb-ns-plain-in-line
-     (let ((c (nth 0 args)))
-       (yaml--frame "nb-ns-plain-in-line"
-         (yaml--rep 0 nil
-           (yaml--all
-            (yaml--rep 0 nil
-              (yaml--parse-from-grammar 's-white))
-            (yaml--parse-from-grammar 'ns-plain-char c))))))
-
-    ('nb-single-multi-line
-     (let ((n (nth 0 args)))
-       (yaml--frame "nb-single-multi-line"
-         (yaml--all
-          (yaml--parse-from-grammar 'nb-ns-single-in-line)
-          (yaml--any
-           (yaml--parse-from-grammar 's-single-next-line n)
-           (yaml--rep 0 nil
-             (yaml--parse-from-grammar 's-white)))))))
-
-    ('l-document-suffix
-     (yaml--frame "l-document-suffix"
-       (yaml--all (yaml--parse-from-grammar 'c-document-end)
-                  (yaml--parse-from-grammar 's-l-comments))))
-
-    ('c-sequence-start
-     (yaml--frame "c-sequence-start"
-       (yaml--chr ?\[)))
-
-    ('ns-l-block-map-entry
-     (yaml--frame "ns-l-block-map-entry"
-       (yaml--any
-        (yaml--parse-from-grammar 'c-l-block-map-explicit-entry
-                                  (nth 0 args))
-        (yaml--parse-from-grammar 'ns-l-block-map-implicit-entry
-                                  (nth 0 args)))))
-
-    ('ns-l-compact-mapping
-     (yaml--frame "ns-l-compact-mapping"
+(defun yaml--parse-l-nb-spaced-lines (n)
+  (yaml--frame "l-nb-spaced-lines"
+    (yaml--all
+     (yaml--parse-s-nb-spaced-text n)
+     (yaml--rep 0 nil
        (yaml--all
-        (yaml--parse-from-grammar 'ns-l-block-map-entry (nth 0 args))
-        (yaml--rep 0 nil
-          (yaml--all
-           (yaml--parse-from-grammar 's-indent (nth 0 args))
-           (yaml--parse-from-grammar 'ns-l-block-map-entry (nth 0 args)))))))
+        (yaml--parse-b-l-spaced n)
+        (yaml--parse-s-nb-spaced-text n))))))
 
-    ('ns-esc-space
-     (yaml--frame "ns-esc-space" (yaml--chr ?\x20)))
-    ('ns-esc-vertical-tab
-     (yaml--frame "ns-esc-vertical-tab" (yaml--chr ?v)))
+(defun yaml--parse-ns-plain (n c)
+  (yaml--frame "ns-plain"
+    (pcase c
+      ("block-key" (yaml--parse-ns-plain-one-line c))
+      ("flow-in" (yaml--parse-ns-plain-multi-line n c))
+      ("flow-key" (yaml--parse-ns-plain-one-line c))
+      ("flow-out" (yaml--parse-ns-plain-multi-line n c)))))
 
-    ('ns-s-implicit-yaml-key
-     (let ((c (nth 0 args)))
-       (yaml--frame "ns-s-implicit-yaml-key"
-         (yaml--all
-          (yaml--max 1024)
-          (yaml--parse-from-grammar 'ns-flow-yaml-node nil c)
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 's-separate-in-line))))))
+(defun yaml--parse-c-printable ()
+  (yaml--frame "c-printable"
+    (yaml--any (yaml--chr ?\x09)
+               (yaml--chr ?\x0A)
+               (yaml--chr ?\x0D)
+               (yaml--chr-range ?\x20 ?\x7E)
+               (yaml--chr ?\x85)
+               (yaml--chr-range ?\xA0 ?\xD7FF)
+               (yaml--chr-range ?\xE000 ?\xFFFD)
+               (yaml--chr-range ?\x010000 ?\x10FFFF))))
 
-    ('b-l-folded
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "b-l-folded"
-         (yaml--any (yaml--parse-from-grammar 'b-l-trimmed n c)
-                    (yaml--parse-from-grammar 'b-as-space)))))
+(defun yaml--parse-c-mapping-value ()
+  (yaml--frame "c-mapping-value" (yaml--chr ?\:)))
 
-    ('s-l+block-collection
-     (yaml--frame "s-l+block-collection"
+(defun yaml--parse-l-nb-literal-text (n)
+  (yaml--frame "l-nb-literal-text"
+    (yaml--all
+     (yaml--rep 0 nil
+       (yaml--parse-l-empty n "block-in"))
+     (yaml--parse-s-indent n)
+     (yaml--rep 1 nil
+       (yaml--parse-nb-char)))))
+
+(defun yaml--parse-ns-plain-char (c)
+  (yaml--frame "ns-plain-char"
+    (yaml--any
+     (yaml--but
+      (yaml--parse-ns-plain-safe c)
+      (yaml--chr ?\:)
+      (yaml--chr ?\#))
+     (yaml--all
+      (yaml--chk "<=" (yaml--parse-ns-char))
+      (yaml--chr ?\#))
+     (yaml--all
+      (yaml--chr ?\:)
+      (yaml--chk "=" (yaml--parse-ns-plain-safe c))))))
+
+(defun yaml--parse-ns-anchor-char ()
+ (yaml--frame "ns-anchor-char"
+   (yaml--but (yaml--parse-ns-char)
+              (yaml--parse-c-flow-indicator))))
+
+(defun yaml--parse-s-l+block-scalar (n c)
+  (yaml--frame "s-l+block-scalar"
+    (yaml--all (yaml--parse-s-separate (1+ n) c)
+               (yaml--rep 0 1
+                 (yaml--all
+                  (yaml--parse-c-ns-properties (1+ n) c)
+                  (yaml--parse-s-separate (1+ n) c)))
+               (yaml--any (yaml--parse-c-l+literal n)
+                          (yaml--parse-c-l+folded n)))))
+
+(defun yaml--parse-ns-plain-safe-in ()
+ (yaml--frame "ns-plain-safe-in"
+   (yaml--but (yaml--parse-ns-char)
+              (yaml--parse-c-flow-indicator))))
+
+(defun yaml--parse-nb-single-text (n c)
+  (yaml--frame "nb-single-text"
+    (pcase c
+      ("block-key" (yaml--parse-nb-single-one-line))
+      ("flow-in" (yaml--parse-nb-single-multi-line n))
+      ("flow-key" (yaml--parse-nb-single-one-line))
+      ("flow-out" (yaml--parse-nb-single-multi-line n)))))
+
+(defun yaml--parse-s-indent-le (n)
+  (yaml--frame "s-indent-le"
+    (yaml--all (yaml--rep 0 nil
+                 (yaml--parse-s-space))
+               (<= (length (yaml--match)) n))))
+
+(defun yaml--parse-ns-esc-carriage-return ()
+  (yaml--frame "ns-esc-carriage-return"
+    (yaml--chr ?r)))
+
+(defun yaml--parse-l-chomped-empty (n tt)
+  (yaml--frame "l-chomped-empty"
+    (pcase tt
+      ("clip" (yaml--parse-l-strip-empty n))
+      ("keep" (yaml--parse-l-keep-empty n))
+      ("strip" (yaml--parse-l-strip-empty n)))))
+
+(defun yaml--parse-c-s-implicit-json-key (c)
+  (yaml--frame "c-s-implicit-json-key"
+    (yaml--all
+     (yaml--max 1024)
+     (yaml--parse-c-flow-json-node nil c)
+     (yaml--rep 0 1
+       (yaml--parse-s-separate-in-line)))))
+
+(defun yaml--parse-b-as-space ()
+ (yaml--frame "b-as-space"
+   (yaml--parse-b-break)))
+
+(defun yaml--parse-ns-s-flow-seq-entries (n c)
+  (yaml--frame "ns-s-flow-seq-entries"
+    (yaml--all
+     (yaml--parse-ns-flow-seq-entry n c)
+     (yaml--rep 0 1
+       (yaml--parse-s-separate n c))
+     (yaml--rep 0 1
        (yaml--all
+        (yaml--chr ?\,)
         (yaml--rep 0 1
-          (yaml--all
-           (yaml--parse-from-grammar
-            's-separate
-            (+ (nth 0 args) 1)
-            (nth 1 args))
-           (yaml--parse-from-grammar
-            'c-ns-properties
-            (+ (nth 0 args) 1)
-            (nth 1 args))))
-        (yaml--parse-from-grammar 's-l-comments)
+          (yaml--parse-s-separate n c))
+        (yaml--rep 0 1
+          (yaml--parse-ns-s-flow-seq-entries n c)))))))
+
+(defun yaml--parse-l-block-map-explicit-value (n)
+  (yaml--frame "l-block-map-explicit-value"
+    (yaml--all
+     (yaml--parse-s-indent n)
+     (yaml--chr ?\:)
+     (yaml--parse-s-l+block-indented n "block-out"))))
+
+(defun yaml--parse-c-ns-flow-map-json-key-entry (n c)
+  (yaml--frame "c-ns-flow-map-json-key-entry"
+    (yaml--all
+     (yaml--parse-c-flow-json-node n c)
+     (yaml--any
+      (yaml--all
+       (yaml--rep 0 1
+         (yaml--parse-s-separate n c))
+       (yaml--parse-c-ns-flow-map-adjacent-value n c))
+      (yaml--parse-e-node)))))
+
+(defun yaml--parse-c-sequence-entry ()
+  (yaml--frame "c-sequence-entry"
+    (yaml--chr ?\-)))
+
+(defun yaml--parse-l-bare-document ()
+ (yaml--frame "l-bare-document"
+   (yaml--all (yaml--exclude "c-forbidden")
+              (yaml--parse-s-l+block-node -1 "block-in"))))
+
+;; TODO: don't use the symbol t as a variable.
+(defun yaml--parse-b-chomped-last (tt)
+  (yaml--frame "b-chomped-last"
+    (pcase tt
+      ("clip"
+       ;; TODO: Fix this
+       (yaml--any (yaml--parse-b-as-line-feed)
+                  (yaml--end-of-stream)))
+      ("keep"
+       (yaml--any (yaml--parse-b-as-line-feed)
+                  (yaml--end-of-stream)))
+      ("strip"
+       (yaml--any (yaml--parse-b-non-content)
+                  (yaml--end-of-stream))))))
+
+(defun yaml--parse-l-trail-comments (n)
+  (yaml--frame "l-trail-comments"
+    (yaml--all (yaml--parse-s-indent-lt n)
+               (yaml--parse-c-nb-comment-text)
+               (yaml--parse-b-comment)
+               (yaml--rep 0 nil
+                 (yaml--parse-l-comment)))))
+
+(defun yaml--parse-ns-flow-map-yaml-key-entry (n c)
+  (yaml--frame "ns-flow-map-yaml-key-entry"
+    (yaml--all
+     (yaml--parse-ns-flow-yaml-node n c)
+     (yaml--any
+      (yaml--all
+       (yaml--rep 0 1
+         (yaml--parse-s-separate n c))
+       (yaml--parse-c-ns-flow-map-separate-value n c))
+      (yaml--parse-e-node)))))
+
+(defun yaml--parse-s-indent (n)
+  (yaml--frame "s-indent"
+    (yaml--rep n n (yaml--parse-s-space))))
+
+(defun yaml--parse-ns-esc-line-separator ()
+ (yaml--frame "ns-esc-line-separator" (yaml--chr ?L)))
+
+(defun yaml--parse-ns-flow-yaml-node (n c)
+  (yaml--frame "ns-flow-yaml-node"
+    (yaml--any
+     (yaml--parse-c-ns-alias-node)
+     (yaml--parse-ns-flow-yaml-content n c)
+     (yaml--all
+      (yaml--parse-c-ns-properties n c)
+      (yaml--any
+       (yaml--all
+        (yaml--parse-s-separate n c)
+        (yaml--parse-ns-flow-yaml-content n c))
+       (yaml--parse-e-scalar))))))
+
+(defun yaml--parse-ns-yaml-version ()
+ (yaml--frame "ns-yaml-version"
+   (yaml--all (yaml--rep 1 nil
+                (yaml--parse-ns-dec-digit))
+              (yaml--chr ?\.)
+              (yaml--rep 1 nil
+                (yaml--parse-ns-dec-digit)))))
+
+(defun yaml--parse-c-folded ()
+ (yaml--frame "c-folded" (yaml--chr ?\>)))
+
+(defun yaml--parse-c-directives-end ()
+ (yaml--frame "c-directives-end"
+   (yaml--all (yaml--chr ?\-) (yaml--chr ?\-) (yaml--chr ?\-))))
+
+(defun yaml--parse-s-double-break (n)
+  (yaml--frame "s-double-break"
+    (yaml--any (yaml--parse-s-double-escaped n)
+               (yaml--parse-s-flow-folded n))))
+
+(defun yaml--parse-s-nb-spaced-text (n)
+  (yaml--frame "s-nb-spaced-text"
+    (yaml--all (yaml--parse-s-indent n)
+               (yaml--parse-s-white)
+               (yaml--rep 0 nil
+                 (yaml--parse-nb-char)))))
+
+(defun yaml--parse-l-folded-content (n tt)
+  (yaml--frame "l-folded-content"
+    (yaml--all
+     (yaml--rep 0 1
+       (yaml--all (yaml--parse-l-nb-diff-lines n)
+                  (yaml--parse-b-chomped-last tt)))
+     (yaml--parse-l-chomped-empty n tt))))
+
+(defun yaml--parse-nb-ns-plain-in-line (c)
+  (yaml--frame "nb-ns-plain-in-line"
+    (yaml--rep 0 nil
+      (yaml--all
+       (yaml--rep 0 nil
+         (yaml--parse-s-white))
+       (yaml--parse-ns-plain-char c)))))
+
+(defun yaml--parse-nb-single-multi-line (n)
+  (yaml--frame "nb-single-multi-line"
+    (yaml--all
+     (yaml--parse-nb-ns-single-in-line)
+     (yaml--any
+      (yaml--parse-s-single-next-line n)
+      (yaml--rep 0 nil
+        (yaml--parse-s-white))))))
+
+(defun yaml--parse-l-document-suffix ()
+ (yaml--frame "l-document-suffix"
+   (yaml--all (yaml--parse-c-document-end)
+              (yaml--parse-s-l-comments))))
+
+(defun yaml--parse-c-sequence-start ()
+ (yaml--frame "c-sequence-start"
+   (yaml--chr ?\[)))
+
+(defun yaml--parse-ns-l-block-map-entry (n)
+ (yaml--frame "ns-l-block-map-entry"
+   (yaml--any
+    (yaml--parse-c-l-block-map-explicit-entry n)
+    (yaml--parse-ns-l-block-map-implicit-entry n))))
+
+(defun yaml--parse-ns-l-compact-mapping (n)
+ (yaml--frame "ns-l-compact-mapping"
+   (yaml--all
+    (yaml--parse-ns-l-block-map-entry n)
+    (yaml--rep 0 nil
+      (yaml--all
+       (yaml--parse-s-indent n)
+       (yaml--parse-ns-l-block-map-entry n))))))
+
+(defun yaml--parse-ns-esc-space ()
+ (yaml--frame "ns-esc-space" (yaml--chr ?\x20)))
+(defun yaml--parse-ns-esc-vertical-tab ()
+ (yaml--frame "ns-esc-vertical-tab" (yaml--chr ?v)))
+
+(defun yaml--parse-ns-s-implicit-yaml-key (c)
+  (yaml--frame "ns-s-implicit-yaml-key"
+    (yaml--all
+     (yaml--max 1024)
+     (yaml--parse-ns-flow-yaml-node nil c)
+     (yaml--rep 0 1
+       (yaml--parse-s-separate-in-line)))))
+
+(defun yaml--parse-b-l-folded (n c)
+  (yaml--frame "b-l-folded"
+    (yaml--any (yaml--parse-b-l-trimmed n c)
+               (yaml--parse-b-as-space))))
+
+(defun yaml--parse-s-l+block-collection (n c)
+  (yaml--frame "s-l+block-collection"
+    (yaml--all
+     (yaml--rep 0 1
+       (yaml--all
+        (yaml--parse-s-separate (1+ n) c)
+        (yaml--parse-c-ns-properties (1+ n) c)))
+     (yaml--parse-s-l-comments)
+     (yaml--any
+      (yaml--parse-l+block-sequence
+       (yaml--parse-seq-spaces n c))
+      (yaml--parse-l+block-mapping n)))))
+
+(defun yaml--parse-c-quoted-quote ()
+  (yaml--frame "c-quoted-quote" (yaml--all (yaml--chr ?\') (yaml--chr ?\'))))
+
+(defun yaml--parse-l+block-sequence (n)
+ (yaml--frame "l+block-sequence"
+   ;; NOTE: deviated from the spec example here by making new-m at least 1.
+   ;; The wording and examples lead me to believe this is how it's done.
+   ;; ie /* For some fixed auto-detected m > 0 */
+   (let ((new-m (max (yaml--auto-detect-indent n) 1)))
+     (yaml--all
+      (yaml--set m new-m)
+      (yaml--rep 1 nil
+        (yaml--all
+         (yaml--parse-s-indent (+ n new-m))
+         (yaml--parse-c-l-block-seq-entry (+ n new-m))))))))
+
+(defun yaml--parse-c-double-quote ()
+ (yaml--frame "c-double-quote"
+   (yaml--chr ?\")))
+
+(defun yaml--parse-ns-esc-backspace ()
+ (yaml--frame "ns-esc-backspace"
+   (yaml--chr ?b)))
+
+(defun yaml--parse-c-flow-json-content (n c)
+  (yaml--frame "c-flow-json-content"
+    (yaml--any (yaml--parse-c-flow-sequence n c)
+               (yaml--parse-c-flow-mapping n c)
+               (yaml--parse-c-single-quoted n c)
+               (yaml--parse-c-double-quoted n c))))
+
+(defun yaml--parse-c-mapping-end ()
+ (yaml--frame "c-mapping-end" (yaml--chr ?\})))
+
+(defun yaml--parse-nb-single-char ()
+ (yaml--frame "nb-single-char"
+   (yaml--any (yaml--parse-c-quoted-quote)
+              (yaml--but (yaml--parse-nb-json)
+                         (yaml--chr ?\')))))
+
+(defun yaml--parse-ns-flow-node (n c)
+  (yaml--frame "ns-flow-node"
+    (yaml--any
+     (yaml--parse-c-ns-alias-node)
+     (yaml--parse-ns-flow-content n c)
+     (yaml--all
+      (yaml--parse-c-ns-properties n c)
+      (yaml--any
+       (yaml--all (yaml--parse-s-separate n c)
+                  (yaml--parse-ns-flow-content n c))
+       (yaml--parse-e-scalar))))))
+
+(defun yaml--parse-c-non-specific-tag ()
+ (yaml--frame "c-non-specific-tag" (yaml--chr ?\!)))
+
+(defun yaml--parse-l-directive-document ()
+ (yaml--frame "l-directive-document"
+   (yaml--all (yaml--rep 1 nil
+                (yaml--parse-l-directive))
+              (yaml--parse-l-explicit-document))))
+
+(defun yaml--parse-c-l-block-map-explicit-entry (n)
+  (yaml--frame "c-l-block-map-explicit-entry"
+    (yaml--all
+     (yaml--parse-c-l-block-map-explicit-key n)
+     (yaml--any (yaml--parse-l-block-map-explicit-value n)
+                (yaml--parse-e-node)))))
+
+(defun yaml--parse-e-node ()
+ (yaml--frame "e-node"
+   (yaml--parse-e-scalar)))
+
+(defun yaml--parse-seq-spaces (n c)
+  (yaml--frame "seq-spaces"
+    (pcase c
+      ("block-in" n)
+      ("block-out" (yaml--sub n 1)))))
+
+(defun yaml--parse-l-yaml-stream ()
+ (yaml--frame "l-yaml-stream"
+   (yaml--all
+    (yaml--rep 0 nil
+      (yaml--parse-l-document-prefix))
+    (yaml--rep 0 1
+      (yaml--parse-l-any-document))
+    (yaml--rep 0 nil
+      (yaml--any
+       (yaml--all
+        (yaml--rep 1 nil
+          (yaml--parse-l-document-suffix))
+        (yaml--rep 0 nil
+          (yaml--parse-l-document-prefix))
+        (yaml--rep 0 1
+          (yaml--parse-l-any-document)))
+       (yaml--all
+        (yaml--rep 0 nil
+          (yaml--parse-l-document-prefix))
+        (yaml--rep 0 1
+          (yaml--parse-l-explicit-document))))))))
+
+(defun yaml--parse-nb-double-one-line ()
+ (yaml--frame "nb-double-one-line"
+   (yaml--rep 0 nil
+     (yaml--parse-nb-double-char))))
+
+(defun yaml--parse-s-l-comments ()
+ (yaml--frame "s-l-comments"
+   (yaml--all (yaml--any
+               (yaml--parse-s-b-comment)
+               (yaml--start-of-line))
+              (yaml--rep 0 nil
+                (yaml--parse-l-comment)))))
+
+(defun yaml--parse-nb-char ()
+ (yaml--frame "nb-char"
+   (yaml--but (yaml--parse-c-printable)
+              (yaml--parse-b-char)
+              (yaml--parse-c-byte-order-mark))))
+
+(defun yaml--parse-ns-plain-first (c)
+  (yaml--frame "ns-plain-first"
+    (yaml--any
+     (yaml--but (yaml--parse-ns-char)
+                (yaml--parse-c-indicator))
+     (yaml--all
+      (yaml--any (yaml--chr ?\?)
+                 (yaml--chr ?\:)
+                 (yaml--chr ?\-))
+      (yaml--chk "=" (yaml--parse-ns-plain-safe c))))))
+
+(defun yaml--parse-c-ns-esc-char ()
+  (yaml--frame "c-ns-esc-char"
+    (yaml--all
+     (yaml--chr ?\\)
+     (yaml--any (yaml--parse-ns-esc-null)
+                (yaml--parse-ns-esc-bell)
+                (yaml--parse-ns-esc-backspace)
+                (yaml--parse-ns-esc-horizontal-tab)
+                (yaml--parse-ns-esc-line-feed)
+                (yaml--parse-ns-esc-vertical-tab)
+                (yaml--parse-ns-esc-form-feed)
+                (yaml--parse-ns-esc-carriage-return)
+                (yaml--parse-ns-esc-escape)
+                (yaml--parse-ns-esc-space)
+                (yaml--parse-ns-esc-double-quote)
+                (yaml--parse-ns-esc-slash)
+                (yaml--parse-ns-esc-backslash)
+                (yaml--parse-ns-esc-next-line)
+                (yaml--parse-ns-esc-non-breaking-space)
+                (yaml--parse-ns-esc-line-separator)
+                (yaml--parse-ns-esc-paragraph-separator)
+                (yaml--parse-ns-esc-8-bit)
+                (yaml--parse-ns-esc-16-bit)
+                (yaml--parse-ns-esc-32-bit)))))
+
+(defun yaml--parse-ns-flow-map-entry (n c)
+  (yaml--frame "ns-flow-map-entry"
+    (yaml--any
+     (yaml--all (yaml--chr ?\?)
+                (yaml--parse-s-separate n c)
+                (yaml--parse-ns-flow-map-explicit-entry n c))
+     (yaml--parse-ns-flow-map-implicit-entry n c))))
+
+(defun yaml--parse-l-explicit-document ()
+ (yaml--frame "l-explicit-document"
+   (yaml--all
+    (yaml--parse-c-directives-end)
+    (yaml--any (yaml--parse-l-bare-document)
+               (yaml--all (yaml--parse-e-node)
+                          (yaml--parse-s-l-comments))))))
+
+(defun yaml--parse-s-white ()
+ (yaml--frame "s-white"
+   (yaml--any (yaml--parse-s-space)
+              (yaml--parse-s-tab))))
+
+(defun yaml--parse-l-keep-empty (n)
+  (yaml--frame "l-keep-empty"
+    (yaml--all
+     (yaml--rep 0 nil
+       (yaml--parse-l-empty n "block-in"))
+     (yaml--rep 0 1
+       (yaml--parse-l-trail-comments n)))))
+
+(defun yaml--parse-ns-tag-prefix ()
+ (yaml--frame "ns-tag-prefix"
+   (yaml--any (yaml--parse-c-ns-local-tag-prefix)
+              (yaml--parse-ns-global-tag-prefix))))
+
+(defun yaml--parse-c-l+folded (n)
+  (yaml--frame "c-l+folded"
+    (yaml--all
+     (yaml--chr ?\>)
+     (yaml--parse-c-b-block-header n (yaml--state-curr-t))
+     (yaml--parse-l-folded-content
+      (max (+ n (yaml--state-curr-m)) 1)
+      (yaml--state-curr-t)))))
+
+(defun yaml--parse-ns-directive-name ()
+ (yaml--frame "ns-directive-name"
+   (yaml--rep 1 nil (yaml--parse-ns-char))))
+
+(defun yaml--parse-b-char ()
+ (yaml--frame "b-char"
+   (yaml--any (yaml--parse-b-line-feed)
+              (yaml--parse-b-carriage-return))))
+
+(defun yaml--parse-ns-plain-multi-line (n c)
+  (yaml--frame "ns-plain-multi-line"
+    (yaml--all
+     (yaml--parse-ns-plain-one-line c)
+     (yaml--rep 0 nil
+       (yaml--parse-s-ns-plain-next-line n c)))))
+
+(defun yaml--parse-ns-char ()
+ (yaml--frame "ns-char"
+   (yaml--but (yaml--parse-nb-char)
+              (yaml--parse-s-white))))
+
+(defun yaml--parse-s-space ()
+ (yaml--frame "s-space" (yaml--chr ?\x20)))
+
+(defun yaml--parse-c-l-block-seq-entry (n)
+  (yaml--frame "c-l-block-seq-entry"
+    (yaml--all (yaml--chr ?\-)
+               (yaml--chk "!" (yaml--parse-ns-char))
+               (yaml--parse-s-l+block-indented n "block-in"))))
+
+(defun yaml--parse-c-ns-properties (n c)
+  (yaml--frame "c-ns-properties"
+    (yaml--any
+     (yaml--all
+      (yaml--parse-c-ns-tag-property)
+      (yaml--rep 0 1
+        (yaml--all
+         (yaml--parse-s-separate n c)
+         (yaml--parse-c-ns-anchor-property))))
+     (yaml--all
+      (yaml--parse-c-ns-anchor-property)
+      (yaml--rep 0 1
+        (yaml--all
+         (yaml--parse-s-separate n c)
+         (yaml--parse-c-ns-tag-property)))))))
+
+(defun yaml--parse-ns-directive-parameter ()
+ (yaml--frame "ns-directive-parameter"
+   (yaml--rep 1 nil (yaml--parse-ns-char))))
+
+;; FIXME: is TT supposed to be used here?
+(defun yaml--parse-c-chomping-indicator (_tt)
+ (yaml--frame "c-chomping-indicator"
+   (yaml--any (when (yaml--chr ?\-) (yaml--set t "strip") t)
+              (when (yaml--chr ?\+) (yaml--set t "keep") t)
+              (when (yaml--empty) (yaml--set t "clip") t))))
+
+(defun yaml--parse-ns-global-tag-prefix ()
+ (yaml--frame "ns-global-tag-prefix"
+   (yaml--all
+    (yaml--parse-ns-tag-char)
+    (yaml--rep 0 nil
+      (yaml--parse-ns-uri-char)))))
+
+(defun yaml--parse-c-ns-flow-pair-json-key-entry (n c)
+  (yaml--frame "c-ns-flow-pair-json-key-entry"
+    (yaml--all
+     (yaml--parse-c-s-implicit-json-key "flow-key")
+     (yaml--parse-c-ns-flow-map-adjacent-value n c))))
+
+(defun yaml--parse-l-literal-content (n tt)
+  (yaml--frame "l-literal-content"
+    (yaml--all
+     (yaml--rep 0 1
+       (yaml--all (yaml--parse-l-nb-literal-text n)
+                  (yaml--rep 0 nil
+                    (yaml--parse-b-nb-literal-next n))
+                  (yaml--parse-b-chomped-last tt)))
+     (yaml--parse-l-chomped-empty n tt))))
+
+(defun yaml--parse-c-document-end ()
+ (yaml--frame "c-document-end"
+   (yaml--all (yaml--chr ?\.)
+              (yaml--chr ?\.)
+              (yaml--chr ?\.))))
+
+(defun yaml--parse-nb-double-text (n c)
+  (yaml--frame "nb-double-text"
+    (pcase c
+      ("block-key" (yaml--parse-nb-double-one-line))
+      ("flow-in" (yaml--parse-nb-double-multi-line n))
+      ("flow-key" (yaml--parse-nb-double-one-line))
+      ("flow-out" (yaml--parse-nb-double-multi-line n)))))
+
+(defun yaml--parse-s-b-comment ()
+ (yaml--frame "s-b-comment"
+   (yaml--all
+    (yaml--rep 0 1
+      (yaml--all
+       (yaml--parse-s-separate-in-line)
+       (yaml--rep 0 1
+         (yaml--parse-c-nb-comment-text))))
+    (yaml--parse-b-comment))))
+
+(defun yaml--parse-s-block-line-prefix (n)
+  (yaml--frame "s-block-line-prefix"
+    (yaml--parse-s-indent n)))
+
+(defun yaml--parse-c-tag-handle ()
+  (yaml--frame "c-tag-handle"
+    (yaml--any (yaml--parse-c-named-tag-handle)
+               (yaml--parse-c-secondary-tag-handle)
+               (yaml--parse-c-primary-tag-handle))))
+
+(defun yaml--parse-ns-plain-one-line (c)
+  (yaml--frame "ns-plain-one-line"
+    (yaml--all (yaml--parse-ns-plain-first c)
+               (yaml--parse-nb-ns-plain-in-line c))))
+
+(defun yaml--parse-nb-json ()
+ (yaml--frame "nb-json"
+   (yaml--any (yaml--chr ?\x09)
+              (yaml--chr-range ?\x20 ?\x10FFFF))))
+
+(defun yaml--parse-s-ns-plain-next-line (n c)
+  (yaml--frame "s-ns-plain-next-line"
+    (yaml--all (yaml--parse-s-flow-folded n)
+               (yaml--parse-ns-plain-char c)
+               (yaml--parse-nb-ns-plain-in-line c))))
+
+(defun yaml--parse-c-reserved ()
+ (yaml--frame "c-reserved"
+   (yaml--any (yaml--chr ?\@) (yaml--chr ?\`))))
+
+(defun yaml--parse-b-l-trimmed (n c)
+  (yaml--frame "b-l-trimmed"
+    (yaml--all
+     (yaml--parse-b-non-content)
+     (yaml--rep 1 nil
+       (yaml--parse-l-empty n c)))))
+
+(defun yaml--parse-l-document-prefix ()
+ (yaml--frame "l-document-prefix"
+   (yaml--all
+    (yaml--rep 0 1
+      (yaml--parse-c-byte-order-mark))
+    (yaml--rep 0 nil
+      (yaml--parse-l-comment)))))
+
+(defun yaml--parse-c-byte-order-mark ()
+ (yaml--frame "c-byte-order-mark" (yaml--chr ?\xFEFF)))
+
+(defun yaml--parse-c-anchor ()
+ (yaml--frame "c-anchor" (yaml--chr ?\&)))
+
+(defun yaml--parse-s-double-escaped (n)
+  (yaml--frame "s-double-escaped"
+    (yaml--all
+     (yaml--rep 0 nil
+       (yaml--parse-s-white))
+     (yaml--chr ?\\)
+     (yaml--parse-b-non-content)
+     (yaml--rep 0 nil
+       (yaml--parse-l-empty n "flow-in"))
+     (yaml--parse-s-flow-line-prefix n))))
+
+(defun yaml--parse-ns-esc-32-bit ()
+ (yaml--frame "ns-esc-32-bit"
+   (yaml--all
+    (yaml--chr ?U)
+    (yaml--rep 8 8 (yaml--parse-ns-hex-digit)))))
+
+
+(defun yaml--parse-b-non-content ()
+ (yaml--frame "b-non-content" (yaml--parse-b-break)))
+
+(defun yaml--parse-ns-tag-char ()
+ (yaml--frame "ns-tag-char"
+   (yaml--but (yaml--parse-ns-uri-char)
+              (yaml--chr ?\!)
+              (yaml--parse-c-flow-indicator))))
+
+(defun yaml--parse-b-carriage-return ()
+ (yaml--frame "b-carriage-return" (yaml--chr ?\x0D)))
+
+(defun yaml--parse-s-double-next-line (n)
+  (yaml--frame "s-double-next-line"
+    (yaml--all
+     (yaml--parse-s-double-break n)
+     (yaml--rep 0 1
+       (yaml--all
+        (yaml--parse-ns-double-char)
+        (yaml--parse-nb-ns-double-in-line)
         (yaml--any
-         (yaml--parse-from-grammar
-          'l+block-sequence
-          (yaml--parse-from-grammar 'seq-spaces (nth 0 args) (nth 1 args)))
-         (yaml--parse-from-grammar 'l+block-mapping (nth 0 args))))))
+         (yaml--parse-s-double-next-line n)
+         (yaml--rep 0 nil
+           (yaml--parse-s-white))))))))
 
-    ('c-quoted-quote
-     (yaml--frame "c-quoted-quote" (yaml--all (yaml--chr ?\') (yaml--chr ?\'))))
+(defun yaml--parse-ns-esc-non-breaking-space ()
+ (yaml--frame "ns-esc-non-breaking-space" (yaml--chr ?\_)))
 
-    ('l+block-sequence
-     (yaml--frame "l+block-sequence"
-       ;; NOTE: deviated from the spec example here by making new-m at least 1.
-       ;; The wording and examples lead me to believe this is how it's done.
-       ;; ie /* For some fixed auto-detected m > 0 */
-       (let ((new-m (max (yaml--auto-detect-indent (nth 0 args)) 1)))
-         (yaml--all
-          (yaml--set m new-m)
-          (yaml--rep 1 nil
-            (yaml--all
-             (yaml--parse-from-grammar
-              's-indent
-              (+ (nth 0 args) new-m))
-             (yaml--parse-from-grammar
-              'c-l-block-seq-entry
-              (+ (nth 0 args) new-m))))))))
+(defun yaml--parse-l-nb-diff-lines (n)
+  (yaml--frame "l-nb-diff-lines"
+    (yaml--all
+     (yaml--parse-l-nb-same-lines n)
+     (yaml--rep 0 nil
+       (yaml--all (yaml--parse-b-as-line-feed)
+                  (yaml--parse-l-nb-same-lines n))))))
 
-    ('c-double-quote
-     (yaml--frame "c-double-quote"
-       (yaml--chr ?\")))
+(defun yaml--parse-s-flow-folded (n)
+  (yaml--frame "s-flow-folded"
+    (yaml--all
+     (yaml--rep 0 1
+       (yaml--parse-s-separate-in-line))
+     (yaml--parse-b-l-folded n "flow-in")
+     (yaml--parse-s-flow-line-prefix n))))
 
-    ('ns-esc-backspace
-     (yaml--frame "ns-esc-backspace"
-       (yaml--chr ?b)))
+(defun yaml--parse-ns-flow-map-explicit-entry (n c)
+  (yaml--frame "ns-flow-map-explicit-entry"
+    (yaml--any
+     (yaml--parse-ns-flow-map-implicit-entry n c)
+     (yaml--all
+      (yaml--parse-e-node)
+      (yaml--parse-e-node)))))
 
-    ('c-flow-json-content
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-flow-json-content"
-         (yaml--any (yaml--parse-from-grammar 'c-flow-sequence n c)
-                    (yaml--parse-from-grammar 'c-flow-mapping n c)
-                    (yaml--parse-from-grammar 'c-single-quoted n c)
-                    (yaml--parse-from-grammar 'c-double-quoted n c)))))
+(defun yaml--parse-ns-l-block-map-implicit-entry (n)
+ (yaml--frame "ns-l-block-map-implicit-entry"
+   (yaml--all
+    (yaml--any (yaml--parse-ns-s-block-map-implicit-key)
+               (yaml--parse-e-node))
+    (yaml--parse-c-l-block-map-implicit-value n))))
 
-    ('c-mapping-end
-     (yaml--frame "c-mapping-end" (yaml--chr ?\})))
+(defun yaml--parse-l-nb-folded-lines (n)
+  (yaml--frame "l-nb-folded-lines"
+    (yaml--all
+     (yaml--parse-s-nb-folded-text n)
+     (yaml--rep 0 nil
+       (yaml--all (yaml--parse-b-l-folded n "block-in")
+                  (yaml--parse-s-nb-folded-text n))))))
 
-    ('nb-single-char
-     (yaml--frame "nb-single-char"
-       (yaml--any (yaml--parse-from-grammar 'c-quoted-quote)
-                  (yaml--but (yaml--parse-from-grammar 'nb-json)
-                             (yaml--chr ?\')))))
+(defun yaml--parse-c-l-block-map-explicit-key (n)
+  (yaml--frame "c-l-block-map-explicit-key"
+    (yaml--all
+     (yaml--chr ?\?)
+     (yaml--parse-s-l+block-indented n "block-out"))))
 
-    ('ns-flow-node
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-node"
-         (yaml--any
-          (yaml--parse-from-grammar 'c-ns-alias-node)
-          (yaml--parse-from-grammar 'ns-flow-content n c)
-          (yaml--all
-           (yaml--parse-from-grammar 'c-ns-properties n c)
-           (yaml--any
-            (yaml--all (yaml--parse-from-grammar 's-separate n c)
-                       (yaml--parse-from-grammar 'ns-flow-content n c))
-            (yaml--parse-from-grammar 'e-scalar)))))))
+(defun yaml--parse-s-separate (n c)
+  (yaml--frame "s-separate"
+    (pcase c
+      ("block-in" (yaml--parse-s-separate-lines n))
+      ("block-key" (yaml--parse-s-separate-in-line))
+      ("block-out" (yaml--parse-s-separate-lines n))
+      ("flow-in" (yaml--parse-s-separate-lines n))
+      ("flow-key" (yaml--parse-s-separate-in-line))
+      ("flow-out" (yaml--parse-s-separate-lines n)))))
 
-    ('c-non-specific-tag
-     (yaml--frame "c-non-specific-tag" (yaml--chr ?\!)))
+(defun yaml--parse-ns-flow-pair-entry (n c)
+  (yaml--frame "ns-flow-pair-entry"
+    (yaml--any
+     (yaml--parse-ns-flow-pair-yaml-key-entry n c)
+     (yaml--parse-c-ns-flow-map-empty-key-entry n c)
+     (yaml--parse-c-ns-flow-pair-json-key-entry n c))))
 
-    ('l-directive-document
-     (yaml--frame "l-directive-document"
-       (yaml--all (yaml--rep 1 nil
-                    (yaml--parse-from-grammar 'l-directive))
-                  (yaml--parse-from-grammar 'l-explicit-document))))
+(defun yaml--parse-c-flow-indicator ()
+ (yaml--frame "c-flow-indicator"
+   (yaml--any (yaml--chr ?\,)
+              (yaml--chr ?\[)
+              (yaml--chr ?\])
+              (yaml--chr ?\{)
+              (yaml--chr ?\}))))
 
-    ('c-l-block-map-explicit-entry
-     (let ((n (nth 0 args)))
-       (yaml--frame "c-l-block-map-explicit-entry"
-         (yaml--all
-          (yaml--parse-from-grammar 'c-l-block-map-explicit-key n)
-          (yaml--any (yaml--parse-from-grammar 'l-block-map-explicit-value n)
-                     (yaml--parse-from-grammar 'e-node))))))
+(defun yaml--parse-ns-flow-pair-yaml-key-entry (n c)
+  (yaml--frame "ns-flow-pair-yaml-key-entry"
+    (yaml--all
+     (yaml--parse-ns-s-implicit-yaml-key "flow-key")
+     (yaml--parse-c-ns-flow-map-separate-value n c))))
 
-    ('e-node
-     (yaml--frame "e-node"
-       (yaml--parse-from-grammar 'e-scalar)))
+(defun yaml--parse-e-scalar ()
+ (yaml--frame "e-scalar" (yaml--empty)))
 
-    ('seq-spaces
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "seq-spaces"
-         (pcase c
-           ("block-in" n)
-           ("block-out" (yaml--sub n 1))))))
+(defun yaml--parse-s-indent-lt (n)
+  (yaml--frame "s-indent-lt"
+    (yaml--all
+     (yaml--rep 0 nil
+       (yaml--parse-s-space))
+     (< (length (yaml--match)) n))))
 
-    ('l-yaml-stream
-     (yaml--frame "l-yaml-stream"
+(defun yaml--parse-nb-single-one-line ()
+ (yaml--frame "nb-single-one-line"
+   (yaml--rep 0 nil
+     (yaml--parse-nb-single-char))))
+
+(defun yaml--parse-c-collect-entry ()
+ (yaml--frame "c-collect-entry" (yaml--chr ?\,)))
+
+(defun yaml--parse-ns-l-compact-sequence (n)
+  (yaml--frame "ns-l-compact-sequence"
+    (yaml--all
+     (yaml--parse-c-l-block-seq-entry n)
+     (yaml--rep 0 nil
        (yaml--all
-        (yaml--rep 0 nil
-          (yaml--parse-from-grammar 'l-document-prefix))
+        (yaml--parse-s-indent n)
+        (yaml--parse-c-l-block-seq-entry n))))))
+
+(defun yaml--parse-c-comment ()
+ (yaml--frame "c-comment" (yaml--chr ?\#)))
+
+(defun yaml--parse-s-line-prefix (n c)
+  (yaml--frame "s-line-prefix"
+    (pcase c
+      ("block-in" (yaml--parse-s-block-line-prefix n))
+      ("block-out" (yaml--parse-s-block-line-prefix n))
+      ("flow-in" (yaml--parse-s-flow-line-prefix n))
+      ("flow-out" (yaml--parse-s-flow-line-prefix n)))))
+
+(defun yaml--parse-s-tab ()
+ (yaml--frame "s-tab" (yaml--chr ?\x09)))
+
+(defun yaml--parse-c-directive ()
+ (yaml--frame "c-directive" (yaml--chr ?\%)))
+
+(defun yaml--parse-ns-flow-pair (n c)
+  (yaml--frame "ns-flow-pair"
+    (yaml--any
+     (yaml--all (yaml--chr ?\?)
+                (yaml--parse-s-separate n c)
+                (yaml--parse-ns-flow-map-explicit-entry n c))
+     (yaml--parse-ns-flow-pair-entry n c))))
+
+(defun yaml--parse-s-l+block-indented (n c)
+ (yaml--frame "s-l+block-indented"
+   (let ((m (yaml--auto-detect-indent n)))
+     (yaml--any
+      (yaml--all
+       (yaml--parse-s-indent m)
+       (yaml--any
+        (yaml--parse-ns-l-compact-sequence (+ n (1+ m)))
+        (yaml--parse-ns-l-compact-mapping (+ n (1+ m)))))
+      (yaml--parse-s-l+block-node n c)
+      (yaml--all (yaml--parse-e-node)
+                 (yaml--parse-s-l-comments))))))
+
+(defun yaml--parse-c-single-quote ()
+ (yaml--frame "c-single-quote" (yaml--chr ?\')))
+
+(defun yaml--parse-s-flow-line-prefix (n)
+  (yaml--frame "s-flow-line-prefix"
+    (yaml--all
+     (yaml--parse-s-indent n)
+     (yaml--rep 0 1
+       (yaml--parse-s-separate-in-line)))))
+
+(defun yaml--parse-nb-double-char ()
+ (yaml--frame "nb-double-char"
+   (yaml--any
+    (yaml--parse-c-ns-esc-char)
+    (yaml--but (yaml--parse-nb-json)
+               (yaml--chr ?\\)
+               (yaml--chr ?\")))))
+
+(defun yaml--parse-l-comment ()
+ (yaml--frame "l-comment"
+   (yaml--all
+    (yaml--parse-s-separate-in-line)
+    (yaml--rep 0 1
+      (yaml--parse-c-nb-comment-text))
+    (yaml--parse-b-comment))))
+
+(defun yaml--parse-ns-hex-digit ()
+ (yaml--frame "ns-hex-digit"
+   (yaml--any
+    (yaml--parse-ns-dec-digit)
+    (yaml--chr-range ?\x41 ?\x46)
+    (yaml--chr-range ?\x61 ?\x66))))
+
+(defun yaml--parse-s-l+flow-in-block (n)
+  (yaml--frame "s-l+flow-in-block"
+    (yaml--all
+     (yaml--parse-s-separate (+ n 1) "flow-out")
+     (yaml--parse-ns-flow-node (+ n 1) "flow-out")
+     (yaml--parse-s-l-comments))))
+
+(defun yaml--parse-c-flow-json-node (n c)
+  (yaml--frame "c-flow-json-node"
+    (yaml--all
+     (yaml--rep 0 1
+       (yaml--all
+        (yaml--parse-c-ns-properties n c)
+        (yaml--parse-s-separate n c)))
+     (yaml--parse-c-flow-json-content n c))))
+
+(defun yaml--parse-c-b-block-header (m tt)
+  (yaml--frame "c-b-block-header"
+    (yaml--all
+     (yaml--any
+      (and (not (string-match "\\`[-+][0-9]"
+                              (yaml--slice yaml--parsing-position)))
+           ;; hack to not match this case if there is a number.
+           (yaml--all
+            (yaml--parse-c-indentation-indicator m)
+            (yaml--parse-c-chomping-indicator tt)))
+      (yaml--all
+       (yaml--parse-c-chomping-indicator tt)
+       (yaml--parse-c-indentation-indicator m)))
+     (yaml--parse-s-b-comment))))
+
+(defun yaml--parse-ns-esc-8-bit ()
+ (yaml--frame "ns-esc-8-bit"
+   (yaml--all (yaml--chr ?\x)
+              (yaml--rep 2 2
+                (yaml--parse-ns-hex-digit)))))
+
+(defun yaml--parse-ns-anchor-name ()
+ (yaml--frame "ns-anchor-name"
+   (yaml--rep 1 nil
+     (yaml--parse-ns-anchor-char))))
+
+(defun yaml--parse-ns-esc-slash ()
+ (yaml--frame "ns-esc-slash" (yaml--chr ?\/)))
+
+(defun yaml--parse-s-nb-folded-text (n)
+  (yaml--frame "s-nb-folded-text"
+    (yaml--all (yaml--parse-s-indent n)
+               (yaml--parse-ns-char)
+               (yaml--rep 0 nil
+                 (yaml--parse-nb-char)))))
+
+(defun yaml--parse-ns-word-char ()
+ (yaml--frame "ns-word-char"
+   (yaml--any (yaml--parse-ns-dec-digit)
+              (yaml--parse-ns-ascii-letter)
+              (yaml--chr ?\-))))
+
+(defun yaml--parse-ns-esc-form-feed ()
+ (yaml--frame "ns-esc-form-feed" (yaml--chr ?f)))
+
+(defun yaml--parse-ns-s-block-map-implicit-key ()
+ (yaml--frame "ns-s-block-map-implicit-key"
+   (yaml--any
+    (yaml--parse-c-s-implicit-json-key "block-key")
+    (yaml--parse-ns-s-implicit-yaml-key "block-key"))))
+
+(defun yaml--parse-ns-esc-null ()
+  (yaml--frame "ns-esc-null" (yaml--chr ?\0)))
+
+(defun yaml--parse-c-ns-tag-property ()
+ (yaml--frame "c-ns-tag-property"
+   (yaml--any (yaml--parse-c-verbatim-tag)
+              (yaml--parse-c-ns-shorthand-tag)
+              (yaml--parse-c-non-specific-tag))))
+
+(defun yaml--parse-c-ns-local-tag-prefix ()
+ (yaml--frame "c-ns-local-tag-prefix"
+   (yaml--all
+    (yaml--chr ?\!)
+    (yaml--rep 0 nil
+      (yaml--parse-ns-uri-char)))))
+
+(defun yaml--parse-ns-tag-directive ()
+ (yaml--frame "ns-tag-directive"
+   (yaml--all (yaml--chr ?T) (yaml--chr ?A) (yaml--chr ?G)
+              (yaml--parse-s-separate-in-line)
+              (yaml--parse-c-tag-handle)
+              (yaml--parse-s-separate-in-line)
+              (yaml--parse-ns-tag-prefix))))
+
+(defun yaml--parse-c-flow-mapping (n c)
+  (yaml--frame "c-flow-mapping"
+    (yaml--all
+     (yaml--chr ?\{)
+     (yaml--rep 0 1
+       (yaml--parse-s-separate n c))
+     (yaml--rep 0 1
+       (yaml--parse-ns-s-flow-map-entries n (yaml--parse-in-flow c)))
+     (yaml--chr ?\}))))
+
+(defun yaml--parse-ns-double-char ()
+ (yaml--frame "ns-double-char"
+   (yaml--but (yaml--parse-nb-double-char)
+              (yaml--parse-s-white))))
+
+(defun yaml--parse-ns-ascii-letter ()
+ (yaml--frame "ns-ascii-letter"
+   (yaml--any (yaml--chr-range ?\x41 ?\x5A)
+              (yaml--chr-range ?\x61 ?\x7A))))
+
+(defun yaml--parse-b-break ()
+ (yaml--frame "b-break"
+   (yaml--any (yaml--all (yaml--parse-b-carriage-return)
+                         (yaml--parse-b-line-feed))
+              (yaml--parse-b-carriage-return)
+              (yaml--parse-b-line-feed))))
+
+(defun yaml--parse-nb-ns-double-in-line ()
+ (yaml--frame "nb-ns-double-in-line"
+   (yaml--rep 0 nil
+     (yaml--all
+      (yaml--rep 0 nil
+        (yaml--parse-s-white))
+      (yaml--parse-ns-double-char)))))
+
+(defun yaml--parse-s-l+block-node (n c)
+ (yaml--frame "s-l+block-node"
+   (yaml--any
+    (yaml--parse-s-l+block-in-block n c)
+    (yaml--parse-s-l+flow-in-block n))))
+
+(defun yaml--parse-ns-esc-bell ()
+ (yaml--frame "ns-esc-bell" (yaml--chr ?a)))
+
+(defun yaml--parse-c-named-tag-handle ()
+ (yaml--frame "c-named-tag-handle"
+   (yaml--all
+    (yaml--chr ?\!)
+    (yaml--rep 1 nil (yaml--parse-ns-word-char))
+    (yaml--chr ?\!))))
+
+(defun yaml--parse-s-separate-lines (n)
+  (yaml--frame "s-separate-lines"
+    (yaml--any (yaml--all (yaml--parse-s-l-comments)
+                          (yaml--parse-s-flow-line-prefix n))
+               (yaml--parse-s-separate-in-line))))
+
+(defun yaml--parse-l-directive ()
+ (yaml--frame "l-directive"
+   (yaml--all (yaml--chr ?\%)
+              (yaml--any (yaml--parse-ns-yaml-directive)
+                         (yaml--parse-ns-tag-directive)
+                         (yaml--parse-ns-reserved-directive))
+              (yaml--parse-s-l-comments))))
+
+(defun yaml--parse-ns-esc-escape ()
+ (yaml--frame "ns-esc-escape" (yaml--chr ?e)))
+
+(defun yaml--parse-b-nb-literal-next (n)
+  (yaml--frame "b-nb-literal-next"
+    (yaml--all (yaml--parse-b-as-line-feed)
+               (yaml--parse-l-nb-literal-text n))))
+
+(defun yaml--parse-ns-s-flow-map-entries (n c)
+  (yaml--frame "ns-s-flow-map-entries"
+    (yaml--all
+     (yaml--parse-ns-flow-map-entry n c)
+     (yaml--rep 0 1 (yaml--parse-s-separate n c))
+     (yaml--rep 0 1
+       (yaml--all
+        (yaml--chr ?\,)
         (yaml--rep 0 1
-          (yaml--parse-from-grammar 'l-any-document))
-        (yaml--rep 0 nil
-          (yaml--any
-           (yaml--all
-            (yaml--rep 1 nil
-              (yaml--parse-from-grammar 'l-document-suffix))
-            (yaml--rep 0 nil
-              (yaml--parse-from-grammar 'l-document-prefix))
-            (yaml--rep 0 1
-              (yaml--parse-from-grammar 'l-any-document)))
-           (yaml--all
-            (yaml--rep 0 nil
-              (yaml--parse-from-grammar 'l-document-prefix))
-            (yaml--rep 0 1
-              (yaml--parse-from-grammar 'l-explicit-document))))))))
-
-    ('nb-double-one-line
-     (yaml--frame "nb-double-one-line"
-       (yaml--rep 0 nil
-         (yaml--parse-from-grammar 'nb-double-char))))
-
-    ('s-l-comments
-     (yaml--frame "s-l-comments"
-       (yaml--all (yaml--any
-                   (yaml--parse-from-grammar 's-b-comment)
-                   (yaml--start-of-line))
-                  (yaml--rep 0 nil
-                    (yaml--parse-from-grammar 'l-comment)))))
-
-    ('nb-char
-     (yaml--frame "nb-char"
-       (yaml--but (yaml--parse-from-grammar 'c-printable)
-                  (yaml--parse-from-grammar 'b-char)
-                  (yaml--parse-from-grammar 'c-byte-order-mark))))
-
-    ('ns-plain-first
-     (let ((c (nth 0 args)))
-       (yaml--frame "ns-plain-first"
-         (yaml--any
-          (yaml--but (yaml--parse-from-grammar 'ns-char)
-                     (yaml--parse-from-grammar 'c-indicator))
-          (yaml--all
-           (yaml--any (yaml--chr ?\?)
-                      (yaml--chr ?\:)
-                      (yaml--chr ?\-))
-           (yaml--chk "=" (yaml--parse-from-grammar 'ns-plain-safe c)))))))
-
-    ('c-ns-esc-char
-     (yaml--frame "c-ns-esc-char"
-       (yaml--all
-        (yaml--chr ?\\)
-        (yaml--any (yaml--parse-from-grammar 'ns-esc-null)
-                   (yaml--parse-from-grammar 'ns-esc-bell)
-                   (yaml--parse-from-grammar 'ns-esc-backspace)
-                   (yaml--parse-from-grammar 'ns-esc-horizontal-tab)
-                   (yaml--parse-from-grammar 'ns-esc-line-feed)
-                   (yaml--parse-from-grammar 'ns-esc-vertical-tab)
-                   (yaml--parse-from-grammar 'ns-esc-form-feed)
-                   (yaml--parse-from-grammar 'ns-esc-carriage-return)
-                   (yaml--parse-from-grammar 'ns-esc-escape)
-                   (yaml--parse-from-grammar 'ns-esc-space)
-                   (yaml--parse-from-grammar 'ns-esc-double-quote)
-                   (yaml--parse-from-grammar 'ns-esc-slash)
-                   (yaml--parse-from-grammar 'ns-esc-backslash)
-                   (yaml--parse-from-grammar 'ns-esc-next-line)
-                   (yaml--parse-from-grammar 'ns-esc-non-breaking-space)
-                   (yaml--parse-from-grammar 'ns-esc-line-separator)
-                   (yaml--parse-from-grammar 'ns-esc-paragraph-separator)
-                   (yaml--parse-from-grammar 'ns-esc-8-bit)
-                   (yaml--parse-from-grammar 'ns-esc-16-bit)
-                   (yaml--parse-from-grammar 'ns-esc-32-bit)))))
-
-    ('ns-flow-map-entry
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-map-entry"
-         (yaml--any
-          (yaml--all (yaml--chr ?\?)
-                     (yaml--parse-from-grammar 's-separate n c)
-                     (yaml--parse-from-grammar 'ns-flow-map-explicit-entry n c))
-          (yaml--parse-from-grammar 'ns-flow-map-implicit-entry n c)))))
-
-    ('l-explicit-document
-     (yaml--frame "l-explicit-document"
-       (yaml--all
-        (yaml--parse-from-grammar 'c-directives-end)
-        (yaml--any (yaml--parse-from-grammar 'l-bare-document)
-                   (yaml--all (yaml--parse-from-grammar 'e-node)
-                              (yaml--parse-from-grammar 's-l-comments))))))
-
-    ('s-white
-     (yaml--frame "s-white"
-       (yaml--any (yaml--parse-from-grammar 's-space)
-                  (yaml--parse-from-grammar 's-tab))))
-
-    ('l-keep-empty
-     (let ((n (nth 0 args)))
-       (yaml--frame "l-keep-empty"
-         (yaml--all
-          (yaml--rep 0 nil
-            (yaml--parse-from-grammar 'l-empty n "block-in"))
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 'l-trail-comments n))))))
-
-    ('ns-tag-prefix
-     (yaml--frame "ns-tag-prefix"
-       (yaml--any (yaml--parse-from-grammar 'c-ns-local-tag-prefix)
-                  (yaml--parse-from-grammar 'ns-global-tag-prefix))))
-
-    ('c-l+folded
-     (let ((n (nth 0 args)))
-       (yaml--frame "c-l+folded"
-         (yaml--all
-          (yaml--chr ?\>)
-          (yaml--parse-from-grammar 'c-b-block-header
-                                    n
-                                    (yaml--state-curr-t))
-          (yaml--parse-from-grammar 'l-folded-content
-                                    (max (+ n (yaml--state-curr-m)) 1)
-                                    (yaml--state-curr-t))))))
-
-    ('ns-directive-name
-     (yaml--frame "ns-directive-name"
-       (yaml--rep 1 nil (yaml--parse-from-grammar 'ns-char))))
-
-    ('b-char
-     (yaml--frame "b-char"
-       (yaml--any (yaml--parse-from-grammar 'b-line-feed)
-                  (yaml--parse-from-grammar 'b-carriage-return))))
-
-    ('ns-plain-multi-line
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-plain-multi-line"
-         (yaml--all
-          (yaml--parse-from-grammar 'ns-plain-one-line c)
-          (yaml--rep 0 nil
-            (yaml--parse-from-grammar 's-ns-plain-next-line n c))))))
-
-    ('ns-char
-     (yaml--frame "ns-char"
-       (yaml--but (yaml--parse-from-grammar 'nb-char)
-                  (yaml--parse-from-grammar 's-white))))
-
-    ('s-space
-     (yaml--frame "s-space" (yaml--chr ?\x20)))
-
-    ('c-l-block-seq-entry
-     (yaml--frame "c-l-block-seq-entry"
-       (yaml--all (yaml--chr ?\-)
-                  (yaml--chk "!" (yaml--parse-from-grammar 'ns-char))
-                  (yaml--parse-from-grammar 's-l+block-indented
-                                            (nth 0 args)
-                                            "block-in"))))
-
-    ('c-ns-properties
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-ns-properties"
-         (yaml--any
-          (yaml--all
-           (yaml--parse-from-grammar 'c-ns-tag-property)
-           (yaml--rep 0 1
-             (yaml--all
-              (yaml--parse-from-grammar 's-separate n c)
-              (yaml--parse-from-grammar 'c-ns-anchor-property))))
-          (yaml--all
-           (yaml--parse-from-grammar 'c-ns-anchor-property)
-           (yaml--rep 0 1
-             (yaml--all
-              (yaml--parse-from-grammar 's-separate n c)
-              (yaml--parse-from-grammar 'c-ns-tag-property))))))))
-
-    ('ns-directive-parameter
-     (yaml--frame "ns-directive-parameter"
-       (yaml--rep 1 nil (yaml--parse-from-grammar 'ns-char))))
-
-    ('c-chomping-indicator
-     (yaml--frame "c-chomping-indicator"
-       (yaml--any (when (yaml--chr ?\-) (yaml--set t "strip") t)
-                  (when (yaml--chr ?\+) (yaml--set t "keep") t)
-                  (when (yaml--empty) (yaml--set t "clip") t))))
-
-    ('ns-global-tag-prefix
-     (yaml--frame "ns-global-tag-prefix"
-       (yaml--all
-        (yaml--parse-from-grammar 'ns-tag-char)
-        (yaml--rep 0 nil
-          (yaml--parse-from-grammar 'ns-uri-char)))))
-
-    ('c-ns-flow-pair-json-key-entry
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-ns-flow-pair-json-key-entry"
-         (yaml--all
-          (yaml--parse-from-grammar 'c-s-implicit-json-key "flow-key")
-          (yaml--parse-from-grammar 'c-ns-flow-map-adjacent-value n c)))))
-
-    ('l-literal-content
-     (let ((n (nth 0 args))
-           (tt (nth 1 args)))
-       (yaml--frame "l-literal-content"
-         (yaml--all
-          (yaml--rep 0 1
-            (yaml--all (yaml--parse-from-grammar 'l-nb-literal-text n)
-                       (yaml--rep 0 nil
-                         (yaml--parse-from-grammar 'b-nb-literal-next n))
-                       (yaml--parse-from-grammar 'b-chomped-last tt)))
-          (yaml--parse-from-grammar 'l-chomped-empty n tt)))))
-
-    ('c-document-end
-     (yaml--frame "c-document-end"
-       (yaml--all (yaml--chr ?\.)
-                  (yaml--chr ?\.)
-                  (yaml--chr ?\.))))
-
-    ('nb-double-text
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "nb-double-text"
-         (pcase c
-           ("block-key" (yaml--parse-from-grammar 'nb-double-one-line))
-           ("flow-in" (yaml--parse-from-grammar 'nb-double-multi-line n))
-           ("flow-key" (yaml--parse-from-grammar 'nb-double-one-line))
-           ("flow-out" (yaml--parse-from-grammar 'nb-double-multi-line n))))))
-
-    ('s-b-comment
-     (yaml--frame "s-b-comment"
-       (yaml--all
+          (yaml--parse-s-separate n c))
         (yaml--rep 0 1
+          (yaml--parse-ns-s-flow-map-entries n c)))))))
+
+(defun yaml--parse-c-nb-comment-text ()
+ (yaml--frame "c-nb-comment-text"
+   (yaml--all
+    (yaml--chr ?\#)
+    (yaml--rep 0 nil (yaml--parse-nb-char)))))
+
+(defun yaml--parse-ns-dec-digit ()
+ (yaml--frame "ns-dec-digit"
+   (yaml--chr-range ?\x30 ?\x39)))
+
+(defun yaml--parse-ns-yaml-directive ()
+ (yaml--frame "ns-yaml-directive"
+   (yaml--all (yaml--chr ?Y) (yaml--chr ?A) (yaml--chr ?M) (yaml--chr ?L)
+              (yaml--parse-s-separate-in-line)
+              (yaml--parse-ns-yaml-version))))
+
+(defun yaml--parse-c-mapping-key ()
+ (yaml--frame "c-mapping-key" (yaml--chr ?\?)))
+
+(defun yaml--parse-b-as-line-feed ()
+ (yaml--frame "b-as-line-feed"
+   (yaml--parse-b-break)))
+
+(defun yaml--parse-s-l+block-in-block (n c)
+  (yaml--frame "s-l+block-in-block"
+    (yaml--any
+     (yaml--parse-s-l+block-scalar n c)
+     (yaml--parse-s-l+block-collection n c))))
+
+(defun yaml--parse-ns-esc-paragraph-separator ()
+ (yaml--frame "ns-esc-paragraph-separator" (yaml--chr ?P)))
+
+(defun yaml--parse-c-double-quoted (n c)
+  (yaml--frame "c-double-quoted"
+    (yaml--all (yaml--chr ?\")
+               (yaml--parse-nb-double-text n c)
+               (yaml--chr ?\"))))
+
+(defun yaml--parse-b-line-feed ()
+ (yaml--frame "b-line-feed" (yaml--chr ?\x0A)))
+
+(defun yaml--parse-ns-esc-horizontal-tab ()
+ (yaml--frame "ns-esc-horizontal-tab"
+   (yaml--any (yaml--chr ?t) (yaml--chr ?\x09))))
+
+(defun yaml--parse-c-ns-flow-map-empty-key-entry (n c)
+  (yaml--frame "c-ns-flow-map-empty-key-entry"
+    (yaml--all
+     (yaml--parse-e-node)
+     (yaml--parse-c-ns-flow-map-separate-value n c))))
+
+(defun yaml--parse-l-any-document ()
+ (yaml--frame "l-any-document"
+   (yaml--any (yaml--parse-l-directive-document)
+              (yaml--parse-l-explicit-document)
+              (yaml--parse-l-bare-document))))
+
+(defun yaml--parse-c-tag ()
+  (yaml--frame "c-tag" (yaml--chr ?\!)))
+
+(defun yaml--parse-c-escape ()
+  (yaml--frame "c-escape" (yaml--chr ?\\)))
+
+(defun yaml--parse-c-sequence-end ()
+  (yaml--frame "c-sequence-end" (yaml--chr ?\])))
+
+(defun yaml--parse-l+block-mapping (n)
+ (yaml--frame "l+block-mapping"
+   (let ((new-m (yaml--auto-detect-indent n)))
+     (if (= 0 new-m)
+         nil ;; For some fixed auto-detected m > 0 ;; Is this right???
+       (yaml--all
+        (yaml--set m new-m)
+        (yaml--rep 1 nil
           (yaml--all
-           (yaml--parse-from-grammar 's-separate-in-line)
-           (yaml--rep 0 1
-             (yaml--parse-from-grammar 'c-nb-comment-text))))
-        (yaml--parse-from-grammar 'b-comment))))
+           (yaml--parse-s-indent (+ n new-m))
+           (yaml--parse-ns-l-block-map-entry (+ n new-m)))))))))
 
-    ('s-block-line-prefix
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-block-line-prefix"
-         (yaml--parse-from-grammar 's-indent n))))
+(defun yaml--parse-c-ns-flow-map-adjacent-value (n c)
+  (yaml--frame "c-ns-flow-map-adjacent-value"
+    (yaml--all
+     (yaml--chr ?\:)
+     (yaml--any
+      (yaml--all
+       (yaml--rep 0 1
+         (yaml--parse-s-separate n c))
+       (yaml--parse-ns-flow-node n c))
+      (yaml--parse-e-node)))))
 
-    ('c-tag-handle
-     (yaml--frame "c-tag-handle"
-       (yaml--any (yaml--parse-from-grammar 'c-named-tag-handle)
-                  (yaml--parse-from-grammar 'c-secondary-tag-handle)
-                  (yaml--parse-from-grammar 'c-primary-tag-handle))))
-
-    ('ns-plain-one-line
-     (let ((c (nth 0 args)))
-       (yaml--frame "ns-plain-one-line"
-         (yaml--all (yaml--parse-from-grammar 'ns-plain-first c)
-                    (yaml--parse-from-grammar 'nb-ns-plain-in-line c)))))
-
-    ('nb-json
-     (yaml--frame "nb-json"
-       (yaml--any (yaml--chr ?\x09)
-                  (yaml--chr-range ?\x20 ?\x10FFFF))))
-
-    ('s-ns-plain-next-line
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "s-ns-plain-next-line"
-         (yaml--all (yaml--parse-from-grammar 's-flow-folded n)
-                    (yaml--parse-from-grammar 'ns-plain-char c)
-                    (yaml--parse-from-grammar 'nb-ns-plain-in-line c)))))
-
-    ('c-reserved
-     (yaml--frame "c-reserved"
-       (yaml--any (yaml--chr ?\@) (yaml--chr ?\`))))
-
-    ('b-l-trimmed
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "b-l-trimmed"
-         (yaml--all
-          (yaml--parse-from-grammar 'b-non-content)
-          (yaml--rep 1 nil
-            (yaml--parse-from-grammar 'l-empty n c))))))
-
-    ('l-document-prefix
-     (yaml--frame "l-document-prefix"
+(defun yaml--parse-s-single-next-line (n)
+  (yaml--frame "s-single-next-line"
+    (yaml--all
+     (yaml--parse-s-flow-folded n)
+     (yaml--rep 0 1
        (yaml--all
-        (yaml--rep 0 1
-          (yaml--parse-from-grammar 'c-byte-order-mark))
-        (yaml--rep 0 nil
-          (yaml--parse-from-grammar 'l-comment)))))
-
-    ('c-byte-order-mark
-     (yaml--frame "c-byte-order-mark" (yaml--chr ?\xFEFF)))
-
-    ('c-anchor
-     (yaml--frame "c-anchor" (yaml--chr ?\&)))
-
-    ('s-double-escaped
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-double-escaped"
-         (yaml--all
-          (yaml--rep 0 nil
-            (yaml--parse-from-grammar 's-white))
-          (yaml--chr ?\\)
-          (yaml--parse-from-grammar 'b-non-content)
-          (yaml--rep 0 nil
-            (yaml--parse-from-grammar 'l-empty n "flow-in"))
-          (yaml--parse-from-grammar 's-flow-line-prefix n)))))
-
-    ('ns-esc-32-bit
-     (yaml--frame "ns-esc-32-bit"
-       (yaml--all
-        (yaml--chr ?U)
-        (yaml--rep 8 8 (yaml--parse-from-grammar 'ns-hex-digit)))))
-
-
-    ('b-non-content
-     (yaml--frame "b-non-content" (yaml--parse-from-grammar 'b-break)))
-
-    ('ns-tag-char
-     (yaml--frame "ns-tag-char"
-       (yaml--but (yaml--parse-from-grammar 'ns-uri-char)
-                  (yaml--chr ?\!)
-                  (yaml--parse-from-grammar 'c-flow-indicator))))
-
-    ('b-carriage-return
-     (yaml--frame "b-carriage-return" (yaml--chr ?\x0D)))
-
-    ('s-double-next-line
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-double-next-line"
-         (yaml--all
-          (yaml--parse-from-grammar 's-double-break n)
-          (yaml--rep 0 1
-            (yaml--all
-             (yaml--parse-from-grammar 'ns-double-char)
-             (yaml--parse-from-grammar 'nb-ns-double-in-line)
-             (yaml--any
-              (yaml--parse-from-grammar 's-double-next-line n)
-              (yaml--rep 0 nil
-                (yaml--parse-from-grammar 's-white)))))))))
-
-    ('ns-esc-non-breaking-space
-     (yaml--frame "ns-esc-non-breaking-space" (yaml--chr ?\_)))
-
-    ('l-nb-diff-lines
-     (let ((n (nth 0 args)))
-       (yaml--frame "l-nb-diff-lines"
-         (yaml--all
-          (yaml--parse-from-grammar 'l-nb-same-lines n)
-          (yaml--rep 0 nil
-            (yaml--all (yaml--parse-from-grammar 'b-as-line-feed)
-                       (yaml--parse-from-grammar 'l-nb-same-lines n)))))))
-
-    ('s-flow-folded
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-flow-folded"
-         (yaml--all
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 's-separate-in-line))
-          (yaml--parse-from-grammar 'b-l-folded n "flow-in")
-          (yaml--parse-from-grammar 's-flow-line-prefix n)))))
-
-    ('ns-flow-map-explicit-entry
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-map-explicit-entry"
-         (yaml--any
-          (yaml--parse-from-grammar 'ns-flow-map-implicit-entry n c)
-          (yaml--all
-           (yaml--parse-from-grammar 'e-node)
-           (yaml--parse-from-grammar 'e-node))))))
-
-    ('ns-l-block-map-implicit-entry
-     (yaml--frame "ns-l-block-map-implicit-entry"
-       (yaml--all
-        (yaml--any (yaml--parse-from-grammar 'ns-s-block-map-implicit-key)
-                   (yaml--parse-from-grammar 'e-node))
-        (yaml--parse-from-grammar 'c-l-block-map-implicit-value (nth 0 args)))))
-
-    ('l-nb-folded-lines
-     (let ((n (nth 0 args)))
-       (yaml--frame "l-nb-folded-lines"
-         (yaml--all
-          (yaml--parse-from-grammar 's-nb-folded-text n)
-          (yaml--rep 0 nil
-            (yaml--all (yaml--parse-from-grammar 'b-l-folded n "block-in")
-                       (yaml--parse-from-grammar 's-nb-folded-text n)))))))
-
-    ('c-l-block-map-explicit-key
-     (let ((n (nth 0 args)))
-       (yaml--frame "c-l-block-map-explicit-key"
-         (yaml--all
-          (yaml--chr ?\?)
-          (yaml--parse-from-grammar 's-l+block-indented n "block-out")))))
-
-    ('s-separate
-     (let ((n (nth 0 args))
-           (c (nth 1 args)))
-       (yaml--frame "s-separate"
-         (pcase c
-           ("block-in" (yaml--parse-from-grammar 's-separate-lines n))
-           ("block-key" (yaml--parse-from-grammar 's-separate-in-line))
-           ("block-out" (yaml--parse-from-grammar 's-separate-lines n))
-           ("flow-in" (yaml--parse-from-grammar 's-separate-lines n))
-           ("flow-key" (yaml--parse-from-grammar 's-separate-in-line))
-           ("flow-out" (yaml--parse-from-grammar 's-separate-lines n))))))
-
-    ('ns-flow-pair-entry
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-pair-entry"
-         (yaml--any
-          (yaml--parse-from-grammar 'ns-flow-pair-yaml-key-entry n c)
-          (yaml--parse-from-grammar 'c-ns-flow-map-empty-key-entry n c)
-          (yaml--parse-from-grammar 'c-ns-flow-pair-json-key-entry n c)))))
-
-    ('c-flow-indicator
-     (yaml--frame "c-flow-indicator"
-       (yaml--any (yaml--chr ?\,)
-                  (yaml--chr ?\[)
-                  (yaml--chr ?\])
-                  (yaml--chr ?\{)
-                  (yaml--chr ?\}))))
-
-    ('ns-flow-pair-yaml-key-entry
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-pair-yaml-key-entry"
-         (yaml--all
-          (yaml--parse-from-grammar 'ns-s-implicit-yaml-key "flow-key")
-          (yaml--parse-from-grammar 'c-ns-flow-map-separate-value n c)))))
-
-    ('e-scalar
-     (yaml--frame "e-scalar" (yaml--empty)))
-
-    ('s-indent-lt
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-indent-lt"
-         (yaml--all
-          (yaml--rep 0 nil
-            (yaml--parse-from-grammar 's-space))
-          (< (length (yaml--match)) n)))))
-
-    ('nb-single-one-line
-     (yaml--frame "nb-single-one-line"
-       (yaml--rep 0 nil
-         (yaml--parse-from-grammar 'nb-single-char))))
-
-    ('c-collect-entry
-     (yaml--frame "c-collect-entry" (yaml--chr ?\,)))
-
-    ('ns-l-compact-sequence
-     (let ((n (nth 0 args)))
-       (yaml--frame "ns-l-compact-sequence"
-         (yaml--all
-          (yaml--parse-from-grammar 'c-l-block-seq-entry n)
-          (yaml--rep 0 nil
-            (yaml--all
-             (yaml--parse-from-grammar 's-indent n)
-             (yaml--parse-from-grammar 'c-l-block-seq-entry n)))))))
-
-    ('c-comment
-     (yaml--frame "c-comment" (yaml--chr ?\#)))
-
-    ('s-line-prefix
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "s-line-prefix"
-         (pcase c
-           ("block-in" (yaml--parse-from-grammar 's-block-line-prefix n))
-           ("block-out" (yaml--parse-from-grammar 's-block-line-prefix n))
-           ("flow-in" (yaml--parse-from-grammar 's-flow-line-prefix n))
-           ("flow-out" (yaml--parse-from-grammar 's-flow-line-prefix n))))))
-
-    ('s-tab
-     (yaml--frame "s-tab" (yaml--chr ?\x09)))
-
-    ('c-directive
-     (yaml--frame "c-directive" (yaml--chr ?\%)))
-
-    ('ns-flow-pair
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-pair"
-         (yaml--any
-          (yaml--all (yaml--chr ?\?)
-                     (yaml--parse-from-grammar 's-separate n c)
-                     (yaml--parse-from-grammar 'ns-flow-map-explicit-entry n c))
-          (yaml--parse-from-grammar 'ns-flow-pair-entry n c)))))
-
-    ('s-l+block-indented
-     (yaml--frame "s-l+block-indented"
-       (let ((m (yaml--auto-detect-indent (nth 0 args))))
-         (yaml--any
-          (yaml--all
-           (yaml--parse-from-grammar 's-indent m)
-           (yaml--any
-            (yaml--parse-from-grammar 'ns-l-compact-sequence
-                                      (+ (nth 0 args) (+ 1 m)))
-            (yaml--parse-from-grammar 'ns-l-compact-mapping
-                                      (+ (nth 0 args) (+ 1 m)))))
-          (yaml--parse-from-grammar 's-l+block-node (nth 0 args) (nth 1 args))
-          (yaml--all (yaml--parse-from-grammar 'e-node)
-                     (yaml--parse-from-grammar 's-l-comments))))))
-
-    ('c-single-quote
-     (yaml--frame "c-single-quote" (yaml--chr ?\')))
-
-    ('s-flow-line-prefix
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-flow-line-prefix"
-         (yaml--all
-          (yaml--parse-from-grammar 's-indent n)
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 's-separate-in-line))))))
-
-    ('nb-double-char
-     (yaml--frame "nb-double-char"
-       (yaml--any
-        (yaml--parse-from-grammar 'c-ns-esc-char)
-        (yaml--but (yaml--parse-from-grammar 'nb-json)
-                   (yaml--chr ?\\)
-                   (yaml--chr ?\")))))
-
-    ('l-comment
-     (yaml--frame "l-comment"
-       (yaml--all
-        (yaml--parse-from-grammar 's-separate-in-line)
-        (yaml--rep 0 1
-          (yaml--parse-from-grammar 'c-nb-comment-text))
-        (yaml--parse-from-grammar 'b-comment))))
-
-    ('ns-hex-digit
-     (yaml--frame "ns-hex-digit"
-       (yaml--any
-        (yaml--parse-from-grammar 'ns-dec-digit)
-        (yaml--chr-range ?\x41 ?\x46)
-        (yaml--chr-range ?\x61 ?\x66))))
-
-    ('s-l+flow-in-block
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-l+flow-in-block"
-         (yaml--all
-          (yaml--parse-from-grammar 's-separate (+ n 1) "flow-out")
-          (yaml--parse-from-grammar 'ns-flow-node (+ n 1) "flow-out")
-          (yaml--parse-from-grammar 's-l-comments)))))
-
-    ('c-flow-json-node
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-flow-json-node"
-         (yaml--all
-          (yaml--rep 0 1
-            (yaml--all
-             (yaml--parse-from-grammar 'c-ns-properties n c)
-             (yaml--parse-from-grammar 's-separate n c)))
-          (yaml--parse-from-grammar 'c-flow-json-content n c)))))
-
-    ('c-b-block-header
-     (let ((m (nth 0 args))
-           (tt (nth 1 args)))
-       (yaml--frame "c-b-block-header"
-         (yaml--all
-          (yaml--any
-           (and (not (string-match "\\`[-+][0-9]"
-                                   (yaml--slice yaml--parsing-position)))
-                ;; hack to not match this case if there is a number.
-                (yaml--all
-                 (yaml--parse-from-grammar 'c-indentation-indicator m)
-                 (yaml--parse-from-grammar 'c-chomping-indicator tt)))
-           (yaml--all
-            (yaml--parse-from-grammar 'c-chomping-indicator tt)
-            (yaml--parse-from-grammar 'c-indentation-indicator m)))
-          (yaml--parse-from-grammar 's-b-comment)))))
-
-    ('ns-esc-8-bit
-     (yaml--frame "ns-esc-8-bit"
-       (yaml--all (yaml--chr ?\x)
-                  (yaml--rep 2 2
-                    (yaml--parse-from-grammar 'ns-hex-digit)))))
-
-    ('ns-anchor-name
-     (yaml--frame "ns-anchor-name"
-       (yaml--rep 1 nil
-         (yaml--parse-from-grammar 'ns-anchor-char))))
-
-    ('ns-esc-slash
-     (yaml--frame "ns-esc-slash" (yaml--chr ?\/)))
-
-    ('s-nb-folded-text
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-nb-folded-text"
-         (yaml--all (yaml--parse-from-grammar 's-indent n)
-                    (yaml--parse-from-grammar 'ns-char)
-                    (yaml--rep 0 nil
-                      (yaml--parse-from-grammar 'nb-char))))))
-
-    ('ns-word-char
-     (yaml--frame "ns-word-char"
-       (yaml--any (yaml--parse-from-grammar 'ns-dec-digit)
-                  (yaml--parse-from-grammar 'ns-ascii-letter)
-                  (yaml--chr ?\-))))
-
-    ('ns-esc-form-feed
-     (yaml--frame "ns-esc-form-feed" (yaml--chr ?f)))
-
-    ('ns-s-block-map-implicit-key
-     (yaml--frame "ns-s-block-map-implicit-key"
-       (yaml--any
-        (yaml--parse-from-grammar 'c-s-implicit-json-key "block-key")
-        (yaml--parse-from-grammar 'ns-s-implicit-yaml-key "block-key"))))
-
-    ('ns-esc-null (yaml--frame "ns-esc-null" (yaml--chr ?\0)))
-
-    ('c-ns-tag-property
-     (yaml--frame "c-ns-tag-property"
-       (yaml--any (yaml--parse-from-grammar 'c-verbatim-tag)
-                  (yaml--parse-from-grammar 'c-ns-shorthand-tag)
-                  (yaml--parse-from-grammar 'c-non-specific-tag))))
-
-    ('c-ns-local-tag-prefix
-     (yaml--frame "c-ns-local-tag-prefix"
-       (yaml--all
-        (yaml--chr ?\!)
-        (yaml--rep 0 nil
-          (yaml--parse-from-grammar 'ns-uri-char)))))
-
-    ('ns-tag-directive
-     (yaml--frame "ns-tag-directive"
-       (yaml--all (yaml--chr ?T) (yaml--chr ?A) (yaml--chr ?G)
-                  (yaml--parse-from-grammar 's-separate-in-line)
-                  (yaml--parse-from-grammar 'c-tag-handle)
-                  (yaml--parse-from-grammar 's-separate-in-line)
-                  (yaml--parse-from-grammar 'ns-tag-prefix))))
-
-    ('c-flow-mapping
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-flow-mapping"
-         (yaml--all
-          (yaml--chr ?\{)
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 's-separate n c))
-          (yaml--rep 0 1
-            (yaml--parse-from-grammar 'ns-s-flow-map-entries
-                                      n
-                                      (yaml--parse-from-grammar 'in-flow c)))
-          (yaml--chr ?\})))))
-
-    ('ns-double-char
-     (yaml--frame "ns-double-char"
-       (yaml--but (yaml--parse-from-grammar 'nb-double-char)
-                  (yaml--parse-from-grammar 's-white))))
-
-    ('ns-ascii-letter
-     (yaml--frame "ns-ascii-letter"
-       (yaml--any (yaml--chr-range ?\x41 ?\x5A)
-                  (yaml--chr-range ?\x61 ?\x7A))))
-
-    ('b-break
-     (yaml--frame "b-break"
-       (yaml--any (yaml--all (yaml--parse-from-grammar 'b-carriage-return)
-                             (yaml--parse-from-grammar 'b-line-feed))
-                  (yaml--parse-from-grammar 'b-carriage-return)
-                  (yaml--parse-from-grammar 'b-line-feed))))
-
-    ('nb-ns-double-in-line
-     (yaml--frame "nb-ns-double-in-line"
-       (yaml--rep 0 nil
-         (yaml--all
-          (yaml--rep 0 nil
-            (yaml--parse-from-grammar 's-white))
-          (yaml--parse-from-grammar 'ns-double-char)))))
-
-    ('s-l+block-node
-     (yaml--frame "s-l+block-node"
-       (yaml--any
-        (yaml--parse-from-grammar 's-l+block-in-block (nth 0 args) (nth 1 args))
-        (yaml--parse-from-grammar 's-l+flow-in-block (nth 0 args)))))
-
-    ('ns-esc-bell
-     (yaml--frame "ns-esc-bell" (yaml--chr ?a)))
-
-    ('c-named-tag-handle
-     (yaml--frame "c-named-tag-handle"
-       (yaml--all
-        (yaml--chr ?\!)
-        (yaml--rep 1 nil (yaml--parse-from-grammar 'ns-word-char))
-        (yaml--chr ?\!))))
-
-    ('s-separate-lines
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-separate-lines"
-         (yaml--any (yaml--all (yaml--parse-from-grammar 's-l-comments)
-                               (yaml--parse-from-grammar 's-flow-line-prefix n))
-                    (yaml--parse-from-grammar 's-separate-in-line)))))
-
-    ('l-directive
-     (yaml--frame "l-directive"
-       (yaml--all (yaml--chr ?\%)
-                  (yaml--any (yaml--parse-from-grammar 'ns-yaml-directive)
-                             (yaml--parse-from-grammar 'ns-tag-directive)
-                             (yaml--parse-from-grammar 'ns-reserved-directive))
-                  (yaml--parse-from-grammar 's-l-comments))))
-
-    ('ns-esc-escape
-     (yaml--frame "ns-esc-escape" (yaml--chr ?e)))
-
-    ('b-nb-literal-next
-     (let ((n (nth 0 args)))
-       (yaml--frame "b-nb-literal-next"
-         (yaml--all (yaml--parse-from-grammar 'b-as-line-feed)
-                    (yaml--parse-from-grammar 'l-nb-literal-text n)))))
-
-    ('ns-s-flow-map-entries
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-s-flow-map-entries"
-         (yaml--all
-          (yaml--parse-from-grammar 'ns-flow-map-entry n c)
-          (yaml--rep 0 1 (yaml--parse-from-grammar 's-separate n c))
-          (yaml--rep 0 1
-            (yaml--all
-             (yaml--chr ?\,)
-             (yaml--rep 0 1
-               (yaml--parse-from-grammar 's-separate n c))
-             (yaml--rep 0 1
-               (yaml--parse-from-grammar 'ns-s-flow-map-entries
-                                         n
-                                         c))))))))
-
-    ('c-nb-comment-text
-     (yaml--frame "c-nb-comment-text"
-       (yaml--all
-        (yaml--chr ?\#)
-        (yaml--rep 0 nil (yaml--parse-from-grammar 'nb-char)))))
-
-    ('ns-dec-digit
-     (yaml--frame "ns-dec-digit"
-       (yaml--chr-range ?\x30 ?\x39)))
-
-    ('ns-yaml-directive
-     (yaml--frame "ns-yaml-directive"
-       (yaml--all (yaml--chr ?Y) (yaml--chr ?A) (yaml--chr ?M) (yaml--chr ?L)
-                  (yaml--parse-from-grammar 's-separate-in-line)
-                  (yaml--parse-from-grammar 'ns-yaml-version))))
-
-    ('c-mapping-key
-     (yaml--frame "c-mapping-key" (yaml--chr ?\?)))
-
-    ('b-as-line-feed
-     (yaml--frame "b-as-line-feed"
-       (yaml--parse-from-grammar 'b-break)))
-
-    ('s-l+block-in-block
-     (yaml--frame "s-l+block-in-block"
-       (yaml--any
-        (yaml--parse-from-grammar 's-l+block-scalar
-                                  (nth 0 args)
-                                  (nth 1 args))
-        (yaml--parse-from-grammar 's-l+block-collection
-                                  (nth 0 args)
-                                  (nth 1 args)))))
-
-    ('ns-esc-paragraph-separator
-     (yaml--frame "ns-esc-paragraph-separator" (yaml--chr ?P)))
-
-    ('c-double-quoted
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-double-quoted"
-         (yaml--all (yaml--chr ?\")
-                    (yaml--parse-from-grammar 'nb-double-text n c)
-                    (yaml--chr ?\")))))
-
-    ('b-line-feed
-     (yaml--frame "b-line-feed" (yaml--chr ?\x0A)))
-
-    ('ns-esc-horizontal-tab
-     (yaml--frame "ns-esc-horizontal-tab"
-       (yaml--any (yaml--chr ?t) (yaml--chr ?\x09))))
-
-    ('c-ns-flow-map-empty-key-entry
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-ns-flow-map-empty-key-entry"
-         (yaml--all
-          (yaml--parse-from-grammar 'e-node)
-          (yaml--parse-from-grammar 'c-ns-flow-map-separate-value n c)))))
-
-    ('l-any-document
-     (yaml--frame "l-any-document"
-       (yaml--any (yaml--parse-from-grammar 'l-directive-document)
-                  (yaml--parse-from-grammar 'l-explicit-document)
-                  (yaml--parse-from-grammar 'l-bare-document))))
-
-    ('c-tag (yaml--frame "c-tag" (yaml--chr ?\!)))
-
-    ('c-escape (yaml--frame "c-escape" (yaml--chr ?\\)))
-
-    ('c-sequence-end (yaml--frame "c-sequence-end" (yaml--chr ?\])))
-
-    ('l+block-mapping
-     (yaml--frame "l+block-mapping"
-       (let ((new-m (yaml--auto-detect-indent (nth 0 args))))
-         (if (= 0 new-m)
-             nil ;; For some fixed auto-detected m > 0 ;; Is this right???
-           (yaml--all
-            (yaml--set m new-m)
-            (yaml--rep 1 nil
-              (yaml--all
-               (yaml--parse-from-grammar 's-indent
-                                         (+ (nth 0 args) new-m))
-               (yaml--parse-from-grammar 'ns-l-block-map-entry
-                                         (+ (nth 0 args) new-m)))))))))
-
-    ('c-ns-flow-map-adjacent-value
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-ns-flow-map-adjacent-value"
-         (yaml--all
-          (yaml--chr ?\:)
-          (yaml--any
-           (yaml--all
-            (yaml--rep 0 1
-              (yaml--parse-from-grammar 's-separate n c))
-            (yaml--parse-from-grammar 'ns-flow-node n c))
-           (yaml--parse-from-grammar 'e-node))))))
-
-    ('s-single-next-line
-     (let ((n (nth 0 args)))
-       (yaml--frame "s-single-next-line"
-         (yaml--all
-          (yaml--parse-from-grammar 's-flow-folded n)
-          (yaml--rep 0 1
-            (yaml--all
-             (yaml--parse-from-grammar 'ns-single-char)
-             (yaml--parse-from-grammar 'nb-ns-single-in-line)
-             (yaml--any
-              (yaml--parse-from-grammar 's-single-next-line n)
-              (yaml--rep 0 nil
-                (yaml--parse-from-grammar 's-white)))))))))
-
-    ('s-separate-in-line
-     (yaml--frame "s-separate-in-line"
-       (yaml--any (yaml--rep 1 nil
-                    (yaml--parse-from-grammar 's-white))
-                  (yaml--start-of-line))))
-
-    ('b-comment
-     (yaml--frame "b-comment"
-       (yaml--any (yaml--parse-from-grammar 'b-non-content)
-                  (yaml--end-of-stream))))
-
-    ('ns-esc-backslash
-     (yaml--frame "ns-esc-backslash" (yaml--chr ?\\)))
-
-    ('c-ns-anchor-property
-     (yaml--frame "c-ns-anchor-property"
-       (yaml--all (yaml--chr ?\&)
-                  (yaml--parse-from-grammar 'ns-anchor-name))))
-
-    ('ns-plain-safe
-     (let ((c (nth 0 args)))
-       (yaml--frame "ns-plain-safe"
-         (pcase c
-           ("block-key" (yaml--parse-from-grammar 'ns-plain-safe-out))
-           ("flow-in" (yaml--parse-from-grammar 'ns-plain-safe-in))
-           ("flow-key" (yaml--parse-from-grammar 'ns-plain-safe-in))
-           ("flow-out" (yaml--parse-from-grammar 'ns-plain-safe-out))))))
-
-    ('ns-flow-content
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-content"
-         (yaml--any (yaml--parse-from-grammar 'ns-flow-yaml-content n c)
-                    (yaml--parse-from-grammar 'c-flow-json-content n c)))))
-
-    ('c-ns-flow-map-separate-value
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "c-ns-flow-map-separate-value"
-         (yaml--all
-          (yaml--chr ?\:)
-          (yaml--chk "!" (yaml--parse-from-grammar 'ns-plain-safe c))
-          (yaml--any (yaml--all (yaml--parse-from-grammar 's-separate n c)
-                                (yaml--parse-from-grammar 'ns-flow-node n c))
-                     (yaml--parse-from-grammar 'e-node))))))
-
-    ('in-flow
-     (let ((c (nth 0 args)))
-       (yaml--frame "in-flow"
-         (pcase c
-           ("block-key" "flow-key")
-           ("flow-in" "flow-in")
-           ("flow-key" "flow-key")
-           ("flow-out" "flow-in")))))
-
-    ('c-verbatim-tag
-     (yaml--frame "c-verbatim-tag"
-       (yaml--all
-        (yaml--chr ?\!)
-        (yaml--chr ?\<)
-        (yaml--rep 1 nil (yaml--parse-from-grammar 'ns-uri-char))
-        (yaml--chr ?\>))))
-
-    ('c-literal
-     (yaml--frame "c-literal" (yaml--chr ?\|)))
-
-    ('ns-esc-line-feed
-     (yaml--frame "ns-esc-line-feed" (yaml--chr ?n)))
-
-    ('nb-double-multi-line
-     (let ((n (nth 0 args)))
-       (yaml--frame "nb-double-multi-line"
-         (yaml--all
-          (yaml--parse-from-grammar 'nb-ns-double-in-line)
-          (yaml--any (yaml--parse-from-grammar 's-double-next-line n)
-                     (yaml--rep 0 nil
-                       (yaml--parse-from-grammar 's-white)))))))
-
-    ('b-l-spaced
-     (let ((n (nth 0 args)))
-       (yaml--frame "b-l-spaced"
-         (yaml--all
-          (yaml--parse-from-grammar 'b-as-line-feed)
-          (yaml--rep 0 nil
-            (yaml--parse-from-grammar 'l-empty n "block-in"))))))
-
-    ('ns-flow-yaml-content
-     (let ((n (nth 0 args)) (c (nth 1 args)))
-       (yaml--frame "ns-flow-yaml-content"
-         (yaml--parse-from-grammar 'ns-plain n c))))
-    (_ (error "Unknown parsing grammar state: %s %s" state args))))
+        (yaml--parse-ns-single-char)
+        (yaml--parse-nb-ns-single-in-line)
+        (yaml--any
+         (yaml--parse-s-single-next-line n)
+         (yaml--rep 0 nil
+           (yaml--parse-s-white))))))))
+
+(defun yaml--parse-s-separate-in-line ()
+ (yaml--frame "s-separate-in-line"
+   (yaml--any (yaml--rep 1 nil
+                (yaml--parse-s-white))
+              (yaml--start-of-line))))
+
+(defun yaml--parse-b-comment ()
+ (yaml--frame "b-comment"
+   (yaml--any (yaml--parse-b-non-content)
+              (yaml--end-of-stream))))
+
+(defun yaml--parse-ns-esc-backslash ()
+ (yaml--frame "ns-esc-backslash" (yaml--chr ?\\)))
+
+(defun yaml--parse-c-ns-anchor-property ()
+ (yaml--frame "c-ns-anchor-property"
+   (yaml--all (yaml--chr ?\&)
+              (yaml--parse-ns-anchor-name))))
+
+(defun yaml--parse-ns-plain-safe (c)
+  (yaml--frame "ns-plain-safe"
+    (pcase c
+      ("block-key" (yaml--parse-ns-plain-safe-out))
+      ("flow-in" (yaml--parse-ns-plain-safe-in))
+      ("flow-key" (yaml--parse-ns-plain-safe-in))
+      ("flow-out" (yaml--parse-ns-plain-safe-out)))))
+
+(defun yaml--parse-ns-flow-content (n c)
+  (yaml--frame "ns-flow-content"
+    (yaml--any (yaml--parse-ns-flow-yaml-content n c)
+               (yaml--parse-c-flow-json-content n c))))
+
+(defun yaml--parse-c-ns-flow-map-separate-value (n c)
+  (yaml--frame "c-ns-flow-map-separate-value"
+    (yaml--all
+     (yaml--chr ?\:)
+     (yaml--chk "!" (yaml--parse-ns-plain-safe c))
+     (yaml--any (yaml--all (yaml--parse-s-separate n c)
+                           (yaml--parse-ns-flow-node n c))
+                (yaml--parse-e-node)))))
+
+(defun yaml--parse-in-flow (c)
+  (yaml--frame "in-flow"
+    (pcase c
+      ("block-key" "flow-key")
+      ("flow-in" "flow-in")
+      ("flow-key" "flow-key")
+      ("flow-out" "flow-in"))))
+
+(defun yaml--parse-c-verbatim-tag ()
+ (yaml--frame "c-verbatim-tag"
+   (yaml--all
+    (yaml--chr ?\!)
+    (yaml--chr ?\<)
+    (yaml--rep 1 nil (yaml--parse-ns-uri-char))
+    (yaml--chr ?\>))))
+
+(defun yaml--parse-c-literal ()
+ (yaml--frame "c-literal" (yaml--chr ?\|)))
+
+(defun yaml--parse-ns-esc-line-feed ()
+ (yaml--frame "ns-esc-line-feed" (yaml--chr ?n)))
+
+(defun yaml--parse-nb-double-multi-line (n)
+  (yaml--frame "nb-double-multi-line"
+    (yaml--all
+     (yaml--parse-nb-ns-double-in-line)
+     (yaml--any (yaml--parse-s-double-next-line n)
+                (yaml--rep 0 nil
+                  (yaml--parse-s-white))))))
+
+(defun yaml--parse-b-l-spaced (n)
+  (yaml--frame "b-l-spaced"
+    (yaml--all
+     (yaml--parse-b-as-line-feed)
+     (yaml--rep 0 nil
+       (yaml--parse-l-empty n "block-in")))))
+
+(defun yaml--parse-ns-flow-yaml-content (n c)
+  (yaml--frame "ns-flow-yaml-content"
+    (yaml--parse-ns-plain n c)))
 
 ;;; Encoding
 
