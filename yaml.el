@@ -483,213 +483,213 @@ reverse order."
   (setcar yaml--object-stack (reverse (car yaml--object-stack))))
 
 (defconst yaml--grammar-events-in
-  '(("l-yaml-stream" . (lambda ()
-                         (yaml--stream-start-event)
-                         (setq yaml--document-start-version nil)
-                         (setq yaml--document-start-explicit nil)
-                         (setq yaml--tag-map (make-hash-table))))
-    ("c-flow-mapping" . (lambda ()
-                          (yaml--mapping-start-event t)))
-    ("c-flow-sequence" . (lambda ()
-                           (yaml--sequence-start-event nil)))
-    ("l+block-mapping" . (lambda ()
-                           (yaml--mapping-start-event nil)))
-    ("l+block-sequence" . (lambda ()
+  `(("l-yaml-stream" . ,(lambda ()
+                          (yaml--stream-start-event)
+                          (setq yaml--document-start-version nil)
+                          (setq yaml--document-start-explicit nil)
+                          (setq yaml--tag-map (make-hash-table))))
+    ("c-flow-mapping" . ,(lambda ()
+                           (yaml--mapping-start-event t)))
+    ("c-flow-sequence" . ,(lambda ()
                             (yaml--sequence-start-event nil)))
-    ("ns-l-compact-mapping" . (lambda ()
-                                (yaml--mapping-start-event nil)))
-    ("ns-l-compact-sequence" . (lambda ()
-                                 (yaml--sequence-start-event nil)))
-    ("ns-flow-pair" . (lambda ()
-                        (yaml--mapping-start-event t)))
-    ("ns-l-block-map-implicit-entry" . (lambda ()))
-    ("ns-l-compact-mapping" . (lambda ()))
-    ("c-l-block-seq-entry" . (lambda ())))
+    ("l+block-mapping" . ,(lambda ()
+                            (yaml--mapping-start-event nil)))
+    ("l+block-sequence" . ,(lambda ()
+                             (yaml--sequence-start-event nil)))
+    ("ns-l-compact-mapping" . ,(lambda ()
+                                 (yaml--mapping-start-event nil)))
+    ("ns-l-compact-sequence" . ,(lambda ()
+                                  (yaml--sequence-start-event nil)))
+    ("ns-flow-pair" . ,(lambda ()
+                         (yaml--mapping-start-event t)))
+    ("ns-l-block-map-implicit-entry" . ,(lambda ()))
+    ("ns-l-compact-mapping" . ,(lambda ()))
+    ("c-l-block-seq-entry" . ,(lambda ())))
   "List of functions for matched rules that run on the entering of a rule.")
 
 (defconst yaml--grammar-events-out
-  '(("c-b-block-header" .
-     (lambda (text)
-       nil))
+  `(("c-b-block-header" .
+     ,(lambda (_text)
+        nil))
     ("l-yaml-stream" .
-     (lambda (text)
-       (yaml--check-document-end)
-       (yaml--stream-end-event)))
+     ,(lambda (_text)
+        (yaml--check-document-end)
+        (yaml--stream-end-event)))
     ("ns-yaml-version" .
-     (lambda (text)
-       (when yaml--document-start-version
-         (throw 'error "Multiple %YAML directives not allowed."))
-       (setq yaml--document-start-version text)))
+     ,(lambda (text)
+        (when yaml--document-start-version
+          (throw 'error "Multiple %YAML directives not allowed."))
+        (setq yaml--document-start-version text)))
     ("c-tag-handle" .
-     (lambda (text)
-       (setq yaml--tag-handle text)))
+     ,(lambda (text)
+        (setq yaml--tag-handle text)))
     ("ns-tag-prefix" .
-     (lambda (text)
-       (puthash yaml--tag-handle text yaml--tag-map)))
+     ,(lambda (text)
+        (puthash yaml--tag-handle text yaml--tag-map)))
     ("c-directives-end" .
-     (lambda (text)
-       (yaml--check-document-end)
-       (setq yaml--document-start-explicit t)))
+     ,(lambda (_text)
+        (yaml--check-document-end)
+        (setq yaml--document-start-explicit t)))
     ("c-document-end" .
-     (lambda (text)
-       (when (not yaml--document-end)
-         (setq yaml--document-end-explicit t))
-       (yaml--check-document-end)))
+     ,(lambda (_text)
+        (when (not yaml--document-end)
+          (setq yaml--document-end-explicit t))
+        (yaml--check-document-end)))
     ("c-flow-mapping" .
-     (lambda (text)
-       (yaml--mapping-end-event)))
+     ,(lambda (_text)
+        (yaml--mapping-end-event)))
     ("c-flow-sequence" .
-     (lambda (text)
-       (yaml--sequence-end-event )))
+     ,(lambda (_text)
+        (yaml--sequence-end-event)))
     ("l+block-mapping" .
-     (lambda (text)
-       (yaml--mapping-end-event)))
+     ,(lambda (_text)
+        (yaml--mapping-end-event)))
     ("l+block-sequence" .
-     (lambda (text)
-       (yaml--reverse-at-list)
-       (yaml--sequence-end-event)))
+     ,(lambda (_text)
+        (yaml--reverse-at-list)
+        (yaml--sequence-end-event)))
     ("ns-l-compact-mapping" .
-     (lambda (text)
-       (yaml--mapping-end-event)))
+     ,(lambda (_text)
+        (yaml--mapping-end-event)))
     ("ns-l-compact-sequence" .
-     (lambda (text)
-       (yaml--sequence-end-event)))
+     ,(lambda (_text)
+        (yaml--sequence-end-event)))
     ("ns-flow-pair" .
-     (lambda (text)
-       (yaml--mapping-end-event)))
+     ,(lambda (_text)
+        (yaml--mapping-end-event)))
     ("ns-plain" .
-     (lambda (text)
-       (let* ((replaced (if (and (zerop (length yaml--state-stack))
-                                 (string-match "\\(^\\|\n\\)\\.\\.\\.\\'" text))
-                            ;; Hack to not send the document parse end.
-                            ;; Will only occur with bare ns-plain at top level.
-                            (replace-regexp-in-string "\\(^\\|\n\\)\\.\\.\\.\\'"
-                                                      ""
-                                                      text)
-                          text))
-              (replaced (replace-regexp-in-string
-                         "\\(?:[ \t]*\r?\n[ \t]*\\)"
-                         "\n"
-                         replaced))
-              (replaced (replace-regexp-in-string
-                         "\\(\n\\)\\(\n*\\)"
-                         (lambda (x)
-                           (if (> (length x) 1)
-                               (substring x 1)
-                             " "))
-                         replaced)))
-         (yaml--scalar-event "plain" replaced))))
-    ("c-single-quoted" .
-     (lambda (text)
-       (let* ((replaced (replace-regexp-in-string
-                         "\\(?:[ \t]*\r?\n[ \t]*\\)"
-                         "\n"
-                         text))
-              (replaced (replace-regexp-in-string
-                         "\\(\n\\)\\(\n*\\)"
-                         (lambda (x)
-                           (if (> (length x) 1)
-                               (substring x 1)
-                             " "))
-                         replaced))
-              (replaced (if (not (equal "''" replaced))
-                            (replace-regexp-in-string
-                             "''"
-                             (lambda (x)
-                               (if (> (length x) 1)
-                                   (substring x 1)
-                                 "'"))
-                             replaced)
+     ,(lambda (text)
+        (let* ((replaced (if (and (zerop (length yaml--state-stack))
+                                  (string-match "\\(^\\|\n\\)\\.\\.\\.\\'" text))
+                             ;; Hack to not send the document parse end.
+                             ;; Will only occur with bare ns-plain at top level.
+                             (replace-regexp-in-string "\\(^\\|\n\\)\\.\\.\\.\\'"
+                                                       ""
+                                                       text)
+                           text))
+               (replaced (replace-regexp-in-string
+                          "\\(?:[ \t]*\r?\n[ \t]*\\)"
+                          "\n"
+                          replaced))
+               (replaced (replace-regexp-in-string
+                          "\\(\n\\)\\(\n*\\)"
+                          (lambda (x)
+                            (if (> (length x) 1)
+                                (substring x 1)
+                              " "))
                           replaced)))
-         (yaml--scalar-event "single"
-                             (substring replaced 1 (1- (length replaced)))))))
+          (yaml--scalar-event "plain" replaced))))
+    ("c-single-quoted" .
+     ,(lambda (text)
+        (let* ((replaced (replace-regexp-in-string
+                          "\\(?:[ \t]*\r?\n[ \t]*\\)"
+                          "\n"
+                          text))
+               (replaced (replace-regexp-in-string
+                          "\\(\n\\)\\(\n*\\)"
+                          (lambda (x)
+                            (if (> (length x) 1)
+                                (substring x 1)
+                              " "))
+                          replaced))
+               (replaced (if (not (equal "''" replaced))
+                             (replace-regexp-in-string
+                              "''"
+                              (lambda (x)
+                                (if (> (length x) 1)
+                                    (substring x 1)
+                                  "'"))
+                              replaced)
+                           replaced)))
+          (yaml--scalar-event "single"
+                              (substring replaced 1 (1- (length replaced)))))))
     ("c-double-quoted" .
-     (lambda (text)
-       (let* ((replaced (replace-regexp-in-string
-                         "\\(?:[ \t]*\r?\n[ \t]*\\)"
-                         "\n"
-                         text))
-              (replaced (replace-regexp-in-string
-                         "\\(\n\\)\\(\n*\\)"
-                         (lambda (x)
-                           (if (> (length x) 1)
-                               (substring x 1)
-                             " "))
-                         replaced))
-              (replaced (replace-regexp-in-string "\\\\\\([\"\\/]\\)"
-                                                  "\\1"
-                                                  replaced))
-              (replaced (replace-regexp-in-string "\\\\ " " " replaced))
-              (replaced (replace-regexp-in-string "\\\\ " " " replaced))
-              (replaced (replace-regexp-in-string "\\\\b" "\b" replaced))
-              (replaced (replace-regexp-in-string "\\\\t" "\t" replaced))
-              (replaced (replace-regexp-in-string "\\\\n" "\n" replaced))
-              (replaced (replace-regexp-in-string "\\\\r" "\r" replaced))
-              (replaced (replace-regexp-in-string "\\\\r" "\r" replaced))
-              (replaced (replace-regexp-in-string
-                         "\\\\x\\([0-9a-fA-F]\\{2\\}\\)"
-                         (lambda (x)
-                           (let ((char-pt (substring 2 x)))
-                             (string (string-to-number char-pt 16))))
-                         replaced))
-              (replaced (replace-regexp-in-string
-                         "\\\\x\\([0-9a-fA-F]\\{2\\}\\)"
-                         (lambda (x)
-                           (let ((char-pt (substring x 2)))
-                             (string (string-to-number char-pt 16))))
-                         replaced))
-              (replaced (replace-regexp-in-string
-                         "\\\\x\\([0-9a-fA-F]\\{4\\}\\)"
-                         (lambda (x)
-                           (let ((char-pt (substring x 2)))
-                             (string (string-to-number char-pt 16))))
-                         replaced))
-              (replaced (replace-regexp-in-string
-                         "\\\\x\\([0-9a-fA-F]\\{8\\}\\)"
-                         (lambda (x)
-                           (let ((char-pt (substring x 2)))
-                             (string (string-to-number char-pt 16))))
-                         replaced))
-              (replaced (replace-regexp-in-string
-                         "\\\\\\\\"
-                         "\\"
-                         replaced))
-              (replaced (substring replaced 1 (1- (length replaced)))))
-         (yaml--scalar-event "double" replaced))))
+     ,(lambda (text)
+        (let* ((replaced (replace-regexp-in-string
+                          "\\(?:[ \t]*\r?\n[ \t]*\\)"
+                          "\n"
+                          text))
+               (replaced (replace-regexp-in-string
+                          "\\(\n\\)\\(\n*\\)"
+                          (lambda (x)
+                            (if (> (length x) 1)
+                                (substring x 1)
+                              " "))
+                          replaced))
+               (replaced (replace-regexp-in-string "\\\\\\([\"\\/]\\)"
+                                                   "\\1"
+                                                   replaced))
+               (replaced (replace-regexp-in-string "\\\\ " " " replaced))
+               (replaced (replace-regexp-in-string "\\\\ " " " replaced))
+               (replaced (replace-regexp-in-string "\\\\b" "\b" replaced))
+               (replaced (replace-regexp-in-string "\\\\t" "\t" replaced))
+               (replaced (replace-regexp-in-string "\\\\n" "\n" replaced))
+               (replaced (replace-regexp-in-string "\\\\r" "\r" replaced))
+               (replaced (replace-regexp-in-string "\\\\r" "\r" replaced))
+               (replaced (replace-regexp-in-string
+                          "\\\\x\\([0-9a-fA-F]\\{2\\}\\)"
+                          (lambda (x)
+                            (let ((char-pt (substring 2 x)))
+                              (string (string-to-number char-pt 16))))
+                          replaced))
+               (replaced (replace-regexp-in-string
+                          "\\\\x\\([0-9a-fA-F]\\{2\\}\\)"
+                          (lambda (x)
+                            (let ((char-pt (substring x 2)))
+                              (string (string-to-number char-pt 16))))
+                          replaced))
+               (replaced (replace-regexp-in-string
+                          "\\\\x\\([0-9a-fA-F]\\{4\\}\\)"
+                          (lambda (x)
+                            (let ((char-pt (substring x 2)))
+                              (string (string-to-number char-pt 16))))
+                          replaced))
+               (replaced (replace-regexp-in-string
+                          "\\\\x\\([0-9a-fA-F]\\{8\\}\\)"
+                          (lambda (x)
+                            (let ((char-pt (substring x 2)))
+                              (string (string-to-number char-pt 16))))
+                          replaced))
+               (replaced (replace-regexp-in-string
+                          "\\\\\\\\"
+                          "\\"
+                          replaced))
+               (replaced (substring replaced 1 (1- (length replaced)))))
+          (yaml--scalar-event "double" replaced))))
     ("c-l+literal" .
-     (lambda (text)
-       (when (equal (car yaml--state-stack) :trail-comments)
-         (pop yaml--state-stack)
-         (let ((comment-text (pop yaml--object-stack)))
-           (setq text (replace-regexp-in-string
-                       (concat (regexp-quote comment-text) "\n*\\'") "" text))))
-       (let* ((processed-text (yaml--process-literal-text text)))
-         (yaml--scalar-event "folded" processed-text))))
+     ,(lambda (text)
+        (when (equal (car yaml--state-stack) :trail-comments)
+          (pop yaml--state-stack)
+          (let ((comment-text (pop yaml--object-stack)))
+            (setq text (replace-regexp-in-string
+                        (concat (regexp-quote comment-text) "\n*\\'") "" text))))
+        (let* ((processed-text (yaml--process-literal-text text)))
+          (yaml--scalar-event "folded" processed-text))))
     ("c-l+folded" .
-     (lambda (text)
-       (when (equal (car yaml--state-stack) :trail-comments)
-         (pop yaml--state-stack)
-         (let ((comment-text (pop yaml--object-stack)))
-           (setq text (replace-regexp-in-string
-                       (concat (regexp-quote comment-text) "\n*\\'") "" text))))
-       (let* ((processed-text (yaml--process-folded-text text)))
-         (yaml--scalar-event "folded" processed-text))))
+     ,(lambda (text)
+        (when (equal (car yaml--state-stack) :trail-comments)
+          (pop yaml--state-stack)
+          (let ((comment-text (pop yaml--object-stack)))
+            (setq text (replace-regexp-in-string
+                        (concat (regexp-quote comment-text) "\n*\\'") "" text))))
+        (let* ((processed-text (yaml--process-folded-text text)))
+          (yaml--scalar-event "folded" processed-text))))
     ("e-scalar" .
-     (lambda (text)
-       (yaml--scalar-event "plain" "null")))
+     ,(lambda (_text)
+        (yaml--scalar-event "plain" "null")))
     ("c-ns-anchor-property" .
-     (lambda (text)
-       (yaml--anchor-event (substring text 1))))
+     ,(lambda (text)
+        (yaml--anchor-event (substring text 1))))
     ("c-ns-tag-property" .
-     (lambda (text)
-       ;; TODO: Implement tags
-       ))
+     ,(lambda (_text)
+        ;; TODO: Implement tags
+        nil))
     ("l-trail-comments" .
-     (lambda (text)
-       (yaml--trail-comments-event text)))
+     ,(lambda (text)
+        (yaml--trail-comments-event text)))
     ("c-ns-alias-node" .
-     (lambda (text)
-       (yaml--alias-event (substring text 1)))))
+     ,(lambda (text)
+        (yaml--alias-event (substring text 1)))))
   "List of functions for matched rules that run on the exiting of a rule.")
 
 (defconst yaml--terminal-rules
